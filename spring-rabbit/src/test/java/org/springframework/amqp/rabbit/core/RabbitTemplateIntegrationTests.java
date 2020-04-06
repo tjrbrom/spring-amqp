@@ -17,6 +17,7 @@
 package org.springframework.amqp.rabbit.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -50,14 +51,11 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.logging.log4j.Level;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Ignore;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TestName;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
@@ -74,6 +72,7 @@ import org.springframework.amqp.core.ReceiveAndReplyCallback;
 import org.springframework.amqp.core.ReceiveAndReplyMessageCallback;
 import org.springframework.amqp.core.ReplyToAddressCallback;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
+import org.springframework.amqp.rabbit.connection.CachingConnectionFactory.ConfirmType;
 import org.springframework.amqp.rabbit.connection.ChannelListener;
 import org.springframework.amqp.rabbit.connection.ClosingRecoveryListener;
 import org.springframework.amqp.rabbit.connection.Connection;
@@ -85,12 +84,14 @@ import org.springframework.amqp.rabbit.connection.RabbitResourceHolder;
 import org.springframework.amqp.rabbit.connection.SingleConnectionFactory;
 import org.springframework.amqp.rabbit.junit.BrokerRunning;
 import org.springframework.amqp.rabbit.junit.BrokerTestUtils;
+import org.springframework.amqp.rabbit.junit.LogLevels;
+import org.springframework.amqp.rabbit.junit.RabbitAvailable;
+import org.springframework.amqp.rabbit.junit.RabbitAvailableCondition;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.adapter.MessageListenerAdapter;
 import org.springframework.amqp.rabbit.support.ConsumerCancelledException;
 import org.springframework.amqp.rabbit.support.DefaultMessagePropertiesConverter;
 import org.springframework.amqp.rabbit.support.MessagePropertiesConverter;
-import org.springframework.amqp.rabbit.test.LogLevelAdjuster;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
 import org.springframework.amqp.support.postprocessor.GUnzipPostProcessor;
 import org.springframework.amqp.support.postprocessor.GZipPostProcessor;
@@ -103,8 +104,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.expression.common.LiteralExpression;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.test.annotation.DirtiesContext;
-import org.springframework.test.context.ContextConfiguration;
-import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
+import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionException;
 import org.springframework.transaction.TransactionStatus;
@@ -137,30 +137,28 @@ import com.rabbitmq.client.impl.AMQImpl;
  * @author Gunnar Hillert
  * @author Artem Bilan
  */
-@ContextConfiguration
-@RunWith(SpringJUnit4ClassRunner.class)
+@SpringJUnitConfig
+@RabbitAvailable({ RabbitTemplateIntegrationTests.ROUTE, RabbitTemplateIntegrationTests.REPLY_QUEUE_NAME })
+@LogLevels(classes = { RabbitTemplate.class,
+			RabbitAdmin.class, RabbitTemplateIntegrationTests.class, BrokerRunning.class,
+			ClosingRecoveryListener.class },
+		level = "DEBUG")
 @DirtiesContext
 public class RabbitTemplateIntegrationTests {
 
 	private static final Log logger = LogFactory.getLog(RabbitTemplateIntegrationTests.class);
 
-	protected static final String ROUTE = "test.queue";
+	public static final String ROUTE = "test.queue.RabbitTemplateIntegrationTests";
 
-	private static final Queue REPLY_QUEUE = new Queue("test.reply.queue");
+	public static final String REPLY_QUEUE_NAME = "test.reply.queue.RabbitTemplateIntegrationTests";
 
-	@Rule
-	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(ROUTE, REPLY_QUEUE.getName());
-
-	@Rule
-	public LogLevelAdjuster logAdjuster = new LogLevelAdjuster(Level.DEBUG, RabbitTemplate.class,
-			RabbitAdmin.class, RabbitTemplateIntegrationTests.class, BrokerRunning.class, ClosingRecoveryListener.class);
-
-	@Rule
-	public TestName testName = new TestName();
+	public static final Queue REPLY_QUEUE = new Queue(REPLY_QUEUE_NAME);
 
 	private CachingConnectionFactory connectionFactory;
 
 	protected RabbitTemplate template;
+
+	protected String testName;
 
 	@Autowired
 	protected RabbitTemplate routingTemplate;
@@ -171,8 +169,8 @@ public class RabbitTemplateIntegrationTests {
 	@Autowired
 	private ConnectionFactory cf2;
 
-	@Before
-	public void create() {
+	@BeforeEach
+	public void create(TestInfo info) {
 		this.connectionFactory = new CachingConnectionFactory();
 		connectionFactory.setHost("localhost");
 		connectionFactory.setPort(BrokerTestUtils.getPort());
@@ -184,18 +182,20 @@ public class RabbitTemplateIntegrationTests {
 		when(cf.getUsername()).thenReturn("guest");
 		when(bf.getBean("cf")).thenReturn(cf);
 		this.template.setBeanFactory(bf);
-		this.template.setBeanName(this.testName.getMethodName() + "RabbitTemplate");
+		this.template.setBeanName(info.getDisplayName() + ".RabbitTemplate");
+		this.testName = info.getDisplayName();
 		this.template.setReplyTimeout(10_000);
 	}
 
-	@After
+	@AfterEach
 	public void cleanup() {
 		this.template.stop();
 		this.connectionFactory.destroy();
-		this.brokerIsRunning.removeTestQueues();
+		RabbitAvailableCondition.getBrokerRunning().purgeTestQueues();
 	}
 
 	@Test
+	@LogLevels(classes = RabbitTemplate.class, categories = "foo", level = "DEBUG")
 	public void testChannelCloseInTx() throws Exception {
 		this.connectionFactory.setPublisherReturns(false);
 		Channel channel = this.connectionFactory.createConnection().createChannel(true);
@@ -276,7 +276,7 @@ public class RabbitTemplateIntegrationTests {
 		assertThat(this.template.receive(ROUTE)).isNull();
 	}
 
-	@Test(expected = ConsumerCancelledException.class)
+	@Test
 	public void testReceiveConsumerCanceled() {
 		ConnectionFactory connectionFactory = new SingleConnectionFactory("localhost", BrokerTestUtils.getPort());
 
@@ -351,12 +351,9 @@ public class RabbitTemplateIntegrationTests {
 
 		this.template = new RabbitTemplate(connectionFactory);
 		this.template.setReceiveTimeout(10000);
-		try {
-			this.template.receive(ROUTE);
-		}
-		finally {
-			executorService.shutdown();
-		}
+		assertThatThrownBy(() -> this.template.receive(ROUTE))
+				.isInstanceOf(ConsumerCancelledException.class);
+		executorService.shutdown();
 	}
 
 	@Test
@@ -1605,7 +1602,7 @@ public class RabbitTemplateIntegrationTests {
 
 	@Test
 	public void waitForConfirms() {
-		this.connectionFactory.setPublisherConfirms(true);
+		this.connectionFactory.setPublisherConfirmType(ConfirmType.CORRELATED);
 		Collection<?> messages = getMessagesToSend();
 		Boolean result = this.template.invoke(t -> {
 			messages.forEach(m -> t.convertAndSend(ROUTE, m));
@@ -1616,7 +1613,7 @@ public class RabbitTemplateIntegrationTests {
 	}
 
 	@Test
-	@Ignore("Not an automated test - requires broker restart")
+	@Disabled("Not an automated test - requires broker restart")
 	public void testReceiveNoAutoRecovery() throws Exception {
 		CachingConnectionFactory ccf = new CachingConnectionFactory("localhost");
 		ccf.getRabbitConnectionFactory().setAutomaticRecoveryEnabled(true);
@@ -1711,7 +1708,6 @@ public class RabbitTemplateIntegrationTests {
 	private static class Foo {
 
 		Foo() {
-			super();
 		}
 
 		@Override

@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package org.springframework.amqp.rabbit.annotation;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.lang.annotation.ElementType;
+import java.lang.annotation.Repeatable;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
@@ -35,8 +36,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.stream.Collectors;
 
-import org.junit.Ignore;
-import org.junit.Test;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
 
 import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.CustomExchange;
@@ -55,6 +56,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.PropertySource;
 import org.springframework.context.support.PropertySourcesPlaceholderConfigurer;
+import org.springframework.core.annotation.AliasFor;
 import org.springframework.stereotype.Component;
 
 /**
@@ -122,9 +124,38 @@ public class RabbitListenerAnnotationBeanPostProcessorTests {
 				Config.class, MetaAnnotationTestBean.class);
 
 		RabbitListenerContainerTestFactory factory = context.getBean(RabbitListenerContainerTestFactory.class);
-		assertThat(factory.getListenerContainers().size()).as("one container should have been registered").isEqualTo(1);
+		assertThat(factory.getListenerContainers().size()).as("one container should have been registered").isEqualTo(2);
 		RabbitListenerEndpoint endpoint = factory.getListenerContainers().get(0).getEndpoint();
-		assertThat(((AbstractRabbitListenerEndpoint) endpoint).getQueueNames().iterator().next()).isEqualTo("metaTestQueue");
+		assertThat(((AbstractRabbitListenerEndpoint) endpoint).getQueueNames()
+				.iterator()
+				.next())
+				.isEqualTo("metaTestQueue1");
+		endpoint = factory.getListenerContainers().get(1).getEndpoint();
+		assertThat(((AbstractRabbitListenerEndpoint) endpoint).getQueueNames()
+				.iterator()
+				.next())
+				.isEqualTo("metaTestQueue2");
+
+		context.close();
+	}
+
+	@Test
+	public void metaAnnotationIsDiscoveredClassLevel() {
+		ConfigurableApplicationContext context = new AnnotationConfigApplicationContext(
+				Config.class, MetaAnnotationTestBean2.class);
+
+		RabbitListenerContainerTestFactory factory = context.getBean(RabbitListenerContainerTestFactory.class);
+		assertThat(factory.getListenerContainers().size()).as("one container should have been registered").isEqualTo(2);
+		RabbitListenerEndpoint endpoint = factory.getListenerContainers().get(0).getEndpoint();
+		assertThat(((AbstractRabbitListenerEndpoint) endpoint).getQueueNames()
+				.iterator()
+				.next())
+				.isEqualTo("metaTestQueue3");
+		endpoint = factory.getListenerContainers().get(1).getEndpoint();
+		assertThat(((AbstractRabbitListenerEndpoint) endpoint).getQueueNames()
+				.iterator()
+				.next())
+				.isEqualTo("metaTestQueue4");
 
 		context.close();
 	}
@@ -197,7 +228,8 @@ public class RabbitListenerAnnotationBeanPostProcessorTests {
 		}
 		catch (BeanCreationException e) {
 			assertThat(e.getCause()).isInstanceOf(IllegalArgumentException.class);
-			assertThat(e.getMessage()).contains("@RabbitListener can't resolve").contains("as either a String or a Queue");
+			assertThat(e.getMessage()).contains("@RabbitListener.queues can't resolve")
+					.contains("as a String[] or a String or a Queue");
 		}
 	}
 
@@ -209,19 +241,25 @@ public class RabbitListenerAnnotationBeanPostProcessorTests {
 		RabbitListenerContainerTestFactory factory = context.getBean(RabbitListenerContainerTestFactory.class);
 		assertThat(factory.getListenerContainers()).as("one container should have been registered").hasSize(1);
 		RabbitListenerEndpoint endpoint = factory.getListenerContainers().get(0).getEndpoint();
-		assertThat(((AbstractRabbitListenerEndpoint) endpoint).getQueueNames()).isEqualTo(Collections.singletonList("my_queue"));
+		assertThat(((AbstractRabbitListenerEndpoint) endpoint).getQueueNames())
+				.isEqualTo(Collections.singletonList("my_queue"));
 		final List<Queue> queues = new ArrayList<>(context.getBeansOfType(Queue.class).values());
 		queues.sort(Comparator.comparing(Queue::getName));
-		assertThat(queues.stream().map(Queue::getName).collect(Collectors.toList())).containsExactly("my_queue", "secondQueue", "testQueue");
+		assertThat(queues.stream().map(Queue::getName).collect(Collectors.toList())).containsExactly("my_queue",
+				"secondQueue", "testQueue");
 		assertThat(queues.get(0).getArguments()).isEqualTo(Collections.singletonMap("foo", "bar"));
 
 		assertThat(context.getBeansOfType(org.springframework.amqp.core.Exchange.class).values()).hasSize(1);
 
 		final List<Binding> bindings = new ArrayList<>(context.getBeansOfType(Binding.class).values());
-		assertThat(bindings).hasSize(2);
+		assertThat(bindings).hasSize(3);
 		bindings.sort(Comparator.comparing(Binding::getRoutingKey));
-		assertThat(bindings.get(0).toString()).isEqualTo("Binding [destination=my_queue, exchange=my_exchange, routingKey=red]");
-		assertThat(bindings.get(1).toString()).isEqualTo("Binding [destination=my_queue, exchange=my_exchange, routingKey=yellow]");
+		assertThat(bindings.get(0).toString())
+				.isEqualTo("Binding [destination=my_queue, exchange=my_exchange, routingKey=green, arguments={}]");
+		assertThat(bindings.get(1).toString())
+				.isEqualTo("Binding [destination=my_queue, exchange=my_exchange, routingKey=red, arguments={}]");
+		assertThat(bindings.get(2).toString())
+				.isEqualTo("Binding [destination=my_queue, exchange=my_exchange, routingKey=yellow, arguments={}]");
 
 		context.close();
 	}
@@ -265,7 +303,7 @@ public class RabbitListenerAnnotationBeanPostProcessorTests {
 	}
 
 	@Test
-	@Ignore("To slow and doesn't have 100% confirmation")
+	@Disabled("Too slow and doesn't have 100% confirmation")
 	public void concurrency() throws InterruptedException, ExecutionException {
 		final int concurrencyLevel = 8;
 		final ExecutorService executorService = Executors.newFixedThreadPool(concurrencyLevel);
@@ -323,16 +361,42 @@ public class RabbitListenerAnnotationBeanPostProcessorTests {
 	@Component
 	static class MetaAnnotationTestBean {
 
-		@FooListener
+		@FooListener("metaTestQueue1")
+		@FooListener("metaTestQueue2")
 		public void handleIt(String body) {
 		}
+
+	}
+
+	@Component
+	@FooListener("metaTestQueue3")
+	@FooListener("metaTestQueue4")
+	static class MetaAnnotationTestBean2 {
+
+		@RabbitHandler
+		public void handleIt(String body) {
+		}
+
 	}
 
 
-	@RabbitListener(queues = "metaTestQueue")
-	@Target(ElementType.METHOD)
+	@RabbitListener(autoStartup = "false")
+	@Target({ ElementType.METHOD, ElementType.TYPE })
 	@Retention(RetentionPolicy.RUNTIME)
+	@Repeatable(FooListeners.class)
 	static @interface FooListener {
+
+		@AliasFor(annotation = RabbitListener.class, attribute = "queues")
+		String[] value() default {};
+
+	}
+
+	@Target({ ElementType.METHOD, ElementType.TYPE })
+	@Retention(RetentionPolicy.RUNTIME)
+	static @interface FooListeners {
+
+		FooListener[] value();
+
 	}
 
 	@Component
@@ -379,8 +443,9 @@ public class RabbitListenerAnnotationBeanPostProcessorTests {
 	static class MultipleRoutingKeysTestBean {
 
 		@RabbitListener(bindings = @QueueBinding(exchange = @Exchange("my_exchange"),
-				value = @org.springframework.amqp.rabbit.annotation.Queue(value = "my_queue", arguments = @Argument(name = "foo", value = "bar")),
-				key = {"${xxxxxxx:red}", "yellow"}))
+				value = @org.springframework.amqp.rabbit.annotation.Queue(value = "my_queue",
+					arguments = @Argument(name = "foo", value = "bar")),
+				key = {"${xxxxxxx:red}", "#{'yellow,green'.split(',')}"}))
 		public void handleIt(String body) {
 		}
 	}

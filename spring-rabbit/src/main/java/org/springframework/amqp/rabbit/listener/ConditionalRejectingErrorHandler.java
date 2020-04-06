@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 the original author or authors.
+ * Copyright 2014-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,7 +25,7 @@ import org.apache.commons.logging.LogFactory;
 import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.amqp.ImmediateAcknowledgeAmqpException;
 import org.springframework.amqp.core.Message;
-import org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException;
+import org.springframework.amqp.rabbit.support.ListenerExecutionFailedException;
 import org.springframework.amqp.support.converter.MessageConversionException;
 import org.springframework.messaging.MessagingException;
 import org.springframework.messaging.handler.invocation.MethodArgumentResolutionException;
@@ -60,6 +60,8 @@ public class ConditionalRejectingErrorHandler implements ErrorHandler {
 
 	private boolean discardFatalsWithXDeath = true;
 
+	private boolean rejectManual = true;
+
 	/**
 	 * Create a handler with the {@link ConditionalRejectingErrorHandler.DefaultExceptionStrategy}.
 	 */
@@ -87,6 +89,15 @@ public class ConditionalRejectingErrorHandler implements ErrorHandler {
 		this.discardFatalsWithXDeath = discardFatalsWithXDeath;
 	}
 
+	/**
+	 * Set to false to NOT reject a fatal message when MANUAL ack mode is being used.
+	 * @param rejectManual false to leave the message in an unack'd state.
+	 * @since 2.1.9
+	 */
+	public void setRejectManual(boolean rejectManual) {
+		this.rejectManual = rejectManual;
+	}
+
 	@Override
 	public void handleError(Throwable t) {
 		log(t);
@@ -102,7 +113,8 @@ public class ConditionalRejectingErrorHandler implements ErrorHandler {
 					}
 				}
 			}
-			throw new AmqpRejectAndDontRequeueException("Error Handler converted exception to fatal", t);
+			throw new AmqpRejectAndDontRequeueException("Error Handler converted exception to fatal", this.rejectManual,
+					t);
 		}
 	}
 
@@ -149,18 +161,12 @@ public class ConditionalRejectingErrorHandler implements ErrorHandler {
 		public boolean isFatal(Throwable t) {
 			Throwable cause = t.getCause();
 			while (cause instanceof MessagingException
-					&& !(cause instanceof
-					org.springframework.messaging.converter.MessageConversionException)
+					&& !(cause instanceof org.springframework.messaging.converter.MessageConversionException)
 					&& !(cause instanceof MethodArgumentResolutionException)) {
 				cause = cause.getCause();
 			}
 			if (t instanceof ListenerExecutionFailedException && isCauseFatal(cause)) {
-				if (this.logger.isWarnEnabled()) {
-					this.logger.warn(
-							"Fatal message conversion error; message rejected; "
-									+ "it will be dropped or routed to a dead letter exchange, if so configured: "
-									+ ((ListenerExecutionFailedException) t).getFailedMessage());
-				}
+				logFatalException((ListenerExecutionFailedException) t, cause);
 				return true;
 			}
 			return false;
@@ -173,6 +179,22 @@ public class ConditionalRejectingErrorHandler implements ErrorHandler {
 					|| cause instanceof NoSuchMethodException
 					|| cause instanceof ClassCastException
 					|| isUserCauseFatal(cause);
+		}
+
+		/**
+		 * Log the fatal ListenerExecutionFailedException at WARN level, excluding stack
+		 * trace. Subclasses can override this behavior.
+		 * @param t the {@link ListenerExecutionFailedException}.
+		 * @param cause the root cause (skipping any general {@link MessagingException}s).
+		 * @since 2.2.4
+		 */
+		protected void logFatalException(ListenerExecutionFailedException t, Throwable cause) {
+			if (this.logger.isWarnEnabled()) {
+				this.logger.warn(
+						"Fatal message conversion error; message rejected; "
+								+ "it will be dropped or routed to a dead letter exchange, if so configured: "
+								+ t.getFailedMessage());
+			}
 		}
 
 		/**

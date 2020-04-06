@@ -55,7 +55,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.aopalliance.intercept.MethodInterceptor;
 import org.aopalliance.intercept.MethodInvocation;
 import org.apache.commons.logging.Log;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 import org.mockito.stubbing.Answer;
 
 import org.springframework.amqp.AmqpAuthenticationException;
@@ -124,7 +124,7 @@ public class SimpleMessageListenerContainerTests {
 		container.setAcknowledgeMode(AcknowledgeMode.NONE);
 		container.setTransactionManager(new TestTransactionManager());
 		assertThatIllegalStateException()
-			.isThrownBy(() -> container.afterPropertiesSet());
+			.isThrownBy(container::afterPropertiesSet);
 		container.stop();
 		singleConnectionFactory.destroy();
 	}
@@ -138,7 +138,7 @@ public class SimpleMessageListenerContainerTests {
 		container.setChannelTransacted(true);
 		container.setAcknowledgeMode(AcknowledgeMode.NONE);
 		assertThatIllegalStateException()
-			.isThrownBy(() -> container.afterPropertiesSet());
+			.isThrownBy(container::afterPropertiesSet);
 		container.stop();
 		singleConnectionFactory.destroy();
 	}
@@ -182,7 +182,7 @@ public class SimpleMessageListenerContainerTests {
 		Channel channel = mock(Channel.class);
 		when(connectionFactory.createConnection()).thenReturn(connection);
 		when(connection.createChannel(false)).thenReturn(channel);
-		final AtomicReference<Consumer> consumer = new AtomicReference<Consumer>();
+		final AtomicReference<Consumer> consumer = new AtomicReference<>();
 		doAnswer(invocation -> {
 			consumer.set(invocation.getArgument(6));
 			consumer.get().handleConsumeOk("1");
@@ -199,7 +199,7 @@ public class SimpleMessageListenerContainerTests {
 		final List<Message> messages = new ArrayList<>();
 		final SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(connectionFactory);
 		container.setQueueNames("foo");
-		container.setTxSize(2);
+		container.setBatchSize(2);
 		container.setMessageListener(messages::add);
 		container.start();
 		BasicProperties props = new BasicProperties();
@@ -251,7 +251,7 @@ public class SimpleMessageListenerContainerTests {
 		final List<Message> messages = new ArrayList<>();
 		final SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(connectionFactory);
 		container.setQueueNames("foobar");
-		container.setTxSize(2);
+		container.setBatchSize(2);
 		container.setMessageListener(messages::add);
 		container.start();
 		BasicProperties props = new BasicProperties();
@@ -492,9 +492,12 @@ public class SimpleMessageListenerContainerTests {
 				any(Consumer.class));
 		Log logger = spy(TestUtils.getPropertyValue(container, "logger", Log.class));
 		doReturn(false).when(logger).isDebugEnabled();
+		doReturn(true).when(logger).isWarnEnabled();
 		final CountDownLatch latch = new CountDownLatch(1);
+		final List<String> messages = new ArrayList<>();
 		doAnswer(invocation -> {
 			String message = invocation.getArgument(0);
+			messages.add(message);
 			if (message.startsWith("Consumer raised exception")) {
 				latch.countDown();
 			}
@@ -502,7 +505,9 @@ public class SimpleMessageListenerContainerTests {
 		}).when(logger).warn(any());
 		new DirectFieldAccessor(container).setPropertyValue("logger", logger);
 		consumer.get().handleCancel("foo");
-		assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
+		assertThat(latch.await(10, TimeUnit.SECONDS))
+				.as("Expected 'Consumer raised exception' but got %s", messages)
+				.isTrue();
 		container.stop();
 	}
 
@@ -555,7 +560,7 @@ public class SimpleMessageListenerContainerTests {
 		class Container extends SimpleMessageListenerContainer {
 
 			@Override
-			public void executeListener(Channel channel, Message messageIn) {
+			public void executeListener(Channel channel, Object messageIn) {
 				super.executeListener(channel, messageIn);
 			}
 
@@ -605,7 +610,7 @@ public class SimpleMessageListenerContainerTests {
 		class Container extends SimpleMessageListenerContainer {
 
 			@Override
-			public void executeListener(Channel channel, Message messageIn) {
+			public void executeListener(Channel channel, Object messageIn) {
 				super.executeListener(channel, messageIn);
 			}
 

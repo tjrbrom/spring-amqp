@@ -21,11 +21,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
 
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
+import org.springframework.amqp.rabbit.connection.CachingConnectionFactory.ConfirmType;
 import org.springframework.amqp.rabbit.connection.Connection;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.junit.RabbitAvailable;
@@ -54,14 +56,14 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests3 {
 	public void testRepublishOnNackThreadNoExchange() throws Exception {
 		CachingConnectionFactory cf = new CachingConnectionFactory(
 				RabbitAvailableCondition.getBrokerRunning().getConnectionFactory());
-		cf.setPublisherConfirms(true);
+		cf.setPublisherConfirmType(ConfirmType.CORRELATED);
 		final RabbitTemplate template = new RabbitTemplate(cf);
 		final CountDownLatch confirmLatch = new CountDownLatch(2);
 		template.setConfirmCallback((cd, a, c) -> {
-			if (confirmLatch.getCount() == 2) {
+			confirmLatch.countDown();
+			if (confirmLatch.getCount() == 1) {
 				template.convertAndSend(QUEUE1, ((MyCD) cd).payload);
 			}
-			confirmLatch.countDown();
 		});
 		template.convertAndSend("bad.exchange", "junk", "foo", new MyCD("foo"));
 		assertThat(confirmLatch.await(10, TimeUnit.SECONDS)).isTrue();
@@ -73,13 +75,15 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests3 {
 		final CachingConnectionFactory cf = new CachingConnectionFactory(
 				RabbitAvailableCondition.getBrokerRunning().getConnectionFactory());
 		cf.setPublisherReturns(true);
-		cf.setPublisherConfirms(true);
+		cf.setPublisherConfirmType(ConfirmType.CORRELATED);
 		final RabbitTemplate template = new RabbitTemplate(cf);
 		final CountDownLatch returnLatch = new CountDownLatch(1);
 		final CountDownLatch confirmLatch = new CountDownLatch(1);
 		final AtomicInteger cacheCount = new AtomicInteger();
+		final AtomicBoolean returnCalledFirst = new AtomicBoolean();
 		template.setConfirmCallback((cd, a, c) -> {
 			cacheCount.set(TestUtils.getPropertyValue(cf, "cachedChannelsNonTransactional", List.class).size());
+			returnCalledFirst.set(returnLatch.getCount() == 0);
 			confirmLatch.countDown();
 		});
 		template.setReturnCallback((m, r, rt, e, rk) -> {
@@ -96,7 +100,12 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests3 {
 		template.convertAndSend("", QUEUE2 + "junk", "foo", new MyCD("foo"));
 		assertThat(returnLatch.await(10, TimeUnit.SECONDS)).isTrue();
 		assertThat(confirmLatch.await(10, TimeUnit.SECONDS)).isTrue();
+		int n = 0;
+		while (n++ < 100 && cacheCount.get() != 1) {
+			Thread.sleep(100);
+		}
 		assertThat(cacheCount.get()).isEqualTo(1);
+		assertThat(returnCalledFirst.get()).isTrue();
 		cf.destroy();
 	}
 
@@ -104,7 +113,7 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests3 {
 	public void testDeferredChannelCacheAck() throws Exception {
 		final CachingConnectionFactory cf = new CachingConnectionFactory(
 				RabbitAvailableCondition.getBrokerRunning().getConnectionFactory());
-		cf.setPublisherConfirms(true);
+		cf.setPublisherConfirmType(ConfirmType.CORRELATED);
 		final RabbitTemplate template = new RabbitTemplate(cf);
 		final CountDownLatch confirmLatch = new CountDownLatch(1);
 		final AtomicInteger cacheCount = new AtomicInteger();
@@ -130,7 +139,7 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests3 {
 	public void testTwoSendsAndReceivesDRTMLC() throws Exception {
 		CachingConnectionFactory cf = new CachingConnectionFactory(
 				RabbitAvailableCondition.getBrokerRunning().getConnectionFactory());
-		cf.setPublisherConfirms(true);
+		cf.setPublisherConfirmType(ConfirmType.CORRELATED);
 		RabbitTemplate template = new RabbitTemplate(cf);
 		template.setReplyTimeout(0);
 		final CountDownLatch confirmLatch = new CountDownLatch(2);

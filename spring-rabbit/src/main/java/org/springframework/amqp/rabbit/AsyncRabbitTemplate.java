@@ -563,12 +563,6 @@ public class AsyncRabbitTemplate implements AsyncAmqpTemplate, ChannelAwareMessa
 		return this.autoStartup;
 	}
 
-	@Override
-	public void stop(Runnable callback) {
-		stop();
-		callback.run();
-	}
-
 	@SuppressWarnings("unchecked")
 	@Override
 	public void onMessage(Message message, Channel channel) {
@@ -806,7 +800,6 @@ public class AsyncRabbitTemplate implements AsyncAmqpTemplate, ChannelAwareMessa
 	private final class CorrelationMessagePostProcessor<C> implements MessagePostProcessor {
 
 		CorrelationMessagePostProcessor() {
-			super();
 		}
 
 		@Override

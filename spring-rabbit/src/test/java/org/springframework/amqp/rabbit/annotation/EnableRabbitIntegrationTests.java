@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 the original author or authors.
+ * Copyright 2014-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,11 +21,13 @@ import static org.assertj.core.api.Assertions.fail;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 
+import java.io.IOException;
 import java.io.Serializable;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -42,14 +44,13 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.aopalliance.aop.Advice;
 import org.aopalliance.intercept.MethodInterceptor;
 import org.aopalliance.intercept.MethodInvocation;
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.ClassRule;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import org.springframework.amqp.AmqpRejectAndDontRequeueException;
+import org.springframework.amqp.core.AcknowledgeMode;
 import org.springframework.amqp.core.DirectExchange;
 import org.springframework.amqp.core.ExchangeTypes;
 import org.springframework.amqp.core.Message;
@@ -66,15 +67,20 @@ import org.springframework.amqp.rabbit.connection.ConnectionNameStrategy;
 import org.springframework.amqp.rabbit.connection.SimplePropertyValueConnectionNameStrategy;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
-import org.springframework.amqp.rabbit.junit.BrokerRunning;
+import org.springframework.amqp.rabbit.junit.BrokerRunningSupport;
+import org.springframework.amqp.rabbit.junit.LogLevels;
+import org.springframework.amqp.rabbit.junit.RabbitAvailable;
+import org.springframework.amqp.rabbit.junit.RabbitAvailableCondition;
 import org.springframework.amqp.rabbit.listener.ConditionalRejectingErrorHandler;
+import org.springframework.amqp.rabbit.listener.DirectMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.MessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.RabbitListenerEndpointRegistrar;
 import org.springframework.amqp.rabbit.listener.RabbitListenerEndpointRegistry;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
+import org.springframework.amqp.rabbit.listener.adapter.ReplyPostProcessor;
 import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.listener.api.RabbitListenerErrorHandler;
-import org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException;
+import org.springframework.amqp.rabbit.support.ListenerExecutionFailedException;
 import org.springframework.amqp.rabbit.test.MessageTestUtils;
 import org.springframework.amqp.support.AmqpHeaders;
 import org.springframework.amqp.support.ConsumerTagStrategy;
@@ -106,6 +112,7 @@ import org.springframework.core.convert.ConversionService;
 import org.springframework.core.convert.converter.Converter;
 import org.springframework.core.convert.support.DefaultConversionService;
 import org.springframework.core.task.TaskExecutor;
+import org.springframework.data.web.JsonPath;
 import org.springframework.lang.NonNull;
 import org.springframework.messaging.converter.GenericMessageConverter;
 import org.springframework.messaging.handler.annotation.Header;
@@ -117,13 +124,8 @@ import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.retry.support.RetryTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.test.annotation.DirtiesContext;
-import org.springframework.test.context.ContextConfiguration;
-import org.springframework.test.context.TestContext;
-import org.springframework.test.context.TestExecutionListeners;
-import org.springframework.test.context.TestExecutionListeners.MergeMode;
 import org.springframework.test.context.TestPropertySource;
-import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
-import org.springframework.test.context.support.AbstractTestExecutionListener;
+import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.EnableTransactionManagement;
 import org.springframework.transaction.annotation.Transactional;
@@ -132,6 +134,9 @@ import org.springframework.util.ErrorHandler;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.http.client.Client;
 import com.rabbitmq.http.client.domain.QueueInfo;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
 /**
  *
@@ -142,31 +147,27 @@ import com.rabbitmq.http.client.domain.QueueInfo;
  *
  * @since 1.4
  */
-@ContextConfiguration(classes = EnableRabbitIntegrationTests.EnableRabbitConfig.class)
-@RunWith(SpringJUnit4ClassRunner.class)
+@SpringJUnitConfig(EnableRabbitIntegrationTests.EnableRabbitConfig.class)
 @DirtiesContext
-@TestExecutionListeners(mergeMode = MergeMode.MERGE_WITH_DEFAULTS,
-		listeners = EnableRabbitIntegrationTests.DeleteQueuesExecutionListener.class)
 @TestPropertySource(properties = "spring.application.name=testConnectionName")
+@RabbitAvailable(queues = { "test.manual.container", "test.no.listener.yet",
+		"test.simple", "test.header", "test.message", "test.reply", "test.sendTo", "test.sendTo.reply",
+		"test.sendTo.spel", "test.sendTo.reply.spel", "test.sendTo.runtimespel", "test.sendTo.reply.runtimespel",
+		"test.sendTo.runtimespelsource", "test.sendTo.runtimespelsource.reply",
+		"test.intercepted", "test.intercepted.withReply",
+		"test.invalidPojo", "differentTypes", "differentTypes2", "differentTypes3",
+		"test.inheritance", "test.inheritance.class",
+		"test.comma.1", "test.comma.2", "test.comma.3", "test.comma.4", "test,with,commas",
+		"test.converted", "test.converted.list", "test.converted.array", "test.converted.args1",
+		"test.converted.args2", "test.converted.message", "test.notconverted.message",
+		"test.notconverted.channel", "test.notconverted.messagechannel", "test.notconverted.messagingmessage",
+		"test.converted.foomessage", "test.notconverted.messagingmessagenotgeneric", "test.simple.direct",
+		"test.simple.direct2", "test.generic.list", "test.generic.map",
+		"amqp656dlq", "test.simple.declare", "test.return.exceptions", "test.pojo.errors", "test.pojo.errors2",
+		"test.messaging.message", "test.amqp.message", "test.bytes.to.string", "test.projection",
+		"manual.acks.1", "manual.acks.2", "erit.batch.1", "erit.batch.2", "erit.batch.3" },
+		purgeAfterEach = false)
 public class EnableRabbitIntegrationTests {
-
-	@ClassRule
-	public static final BrokerRunning brokerRunning = BrokerRunning.isRunningWithEmptyQueues(
-			"test.manual.container", "test.no.listener.yet",
-			"test.simple", "test.header", "test.message", "test.reply", "test.sendTo", "test.sendTo.reply",
-			"test.sendTo.spel", "test.sendTo.reply.spel", "test.sendTo.runtimespel", "test.sendTo.reply.runtimespel",
-			"test.sendTo.runtimespelsource", "test.sendTo.runtimespelsource.reply",
-			"test.intercepted", "test.intercepted.withReply",
-			"test.invalidPojo", "differentTypes", "differentTypes2", "differentTypes3",
-			"test.inheritance", "test.inheritance.class",
-			"test.comma.1", "test.comma.2", "test.comma.3", "test.comma.4", "test,with,commas",
-			"test.converted", "test.converted.list", "test.converted.array", "test.converted.args1",
-			"test.converted.args2", "test.converted.message", "test.notconverted.message",
-			"test.notconverted.channel", "test.notconverted.messagechannel", "test.notconverted.messagingmessage",
-			"test.converted.foomessage", "test.notconverted.messagingmessagenotgeneric", "test.simple.direct",
-			"test.simple.direct2", "test.generic.list", "test.generic.map",
-			"amqp656dlq", "test.simple.declare", "test.return.exceptions", "test.pojo.errors", "test.pojo.errors2",
-			"test.messaging.message", "test.amqp.message", "test.bytes.to.string");
 
 	@Autowired
 	private RabbitTemplate rabbitTemplate;
@@ -213,15 +214,22 @@ public class EnableRabbitIntegrationTests {
 	@Autowired
 	private MyService myService;
 
-	@BeforeClass
+	@Autowired
+	private MeterRegistry meterRegistry;
+
+	@Autowired
+	private MultiListenerBean multi;
+
+	@BeforeAll
 	public static void setUp() {
 		System.setProperty(RabbitListenerAnnotationBeanPostProcessor.RABBIT_EMPTY_STRING_ARGUMENTS_PROPERTY,
 				"test-empty");
 	}
 
-	@AfterClass
+	@AfterAll
 	public static void tearDown() {
 		System.getProperties().remove(RabbitListenerAnnotationBeanPostProcessor.RABBIT_EMPTY_STRING_ARGUMENTS_PROPERTY);
+		RabbitAvailableCondition.getBrokerRunning().removeTestQueues("sendTo.replies", "sendTo.replies.spel");
 	}
 
 	@Test
@@ -303,6 +311,7 @@ public class EnableRabbitIntegrationTests {
 	}
 
 	@Test
+	@LogLevels(classes = { DirectMessageListenerContainer.class, RabbitTemplate.class })
 	public void simpleDirectEndpointWithConcurrency() {
 		String reply = (String) rabbitTemplate.convertSendAndReceive("test.simple.direct2", "foo");
 		assertThat(reply).startsWith("FOOfoo");
@@ -335,20 +344,41 @@ public class EnableRabbitIntegrationTests {
 	public void multiListener() {
 		Foo foo = new Foo();
 		foo.field = "foo";
-		assertThat(rabbitTemplate.convertSendAndReceive("multi.exch", "multi.rk", foo)).isEqualTo("FOO: foo handled by default handler");
+		assertThat(rabbitTemplate.convertSendAndReceive("multi.exch", "multi.rk", foo))
+				.isEqualTo("FOO: foo handled by default handler");
 		Bar bar = new Bar();
 		bar.field = "bar";
 		rabbitTemplate.convertAndSend("multi.exch", "multi.rk", bar);
 		rabbitTemplate.setReceiveTimeout(10000);
 		assertThat(this.rabbitTemplate.receiveAndConvert("sendTo.replies")).isEqualTo("BAR: bar");
+		bar.field = "crash";
+		rabbitTemplate.convertAndSend("multi.exch", "multi.rk", bar);
+		assertThat(this.rabbitTemplate.receiveAndConvert("sendTo.replies"))
+				.isEqualTo("CRASHCRASH Test reply from error handler");
+		bar.field = "bar";
 		Baz baz = new Baz();
 		baz.field = "baz";
 		assertThat(rabbitTemplate.convertSendAndReceive("multi.exch", "multi.rk", baz)).isEqualTo("BAZ: baz");
 		Qux qux = new Qux();
 		qux.field = "qux";
+		List<String> beanMethodHeaders = new ArrayList<>();
+		MessagePostProcessor mpp = msg -> {
+			beanMethodHeaders.add(msg.getMessageProperties().getHeader("bean"));
+			beanMethodHeaders.add(msg.getMessageProperties().getHeader("method"));
+			return msg;
+		};
+		this.rabbitTemplate.setAfterReceivePostProcessors(mpp);
 		assertThat(rabbitTemplate.convertSendAndReceive("multi.exch", "multi.rk", qux)).isEqualTo("QUX: qux: multi.rk");
+		assertThat(beanMethodHeaders).hasSize(2);
+		assertThat(beanMethodHeaders.get(0)).isEqualTo("MultiListenerBean");
+		assertThat(beanMethodHeaders.get(1)).isEqualTo("qux");
+		this.rabbitTemplate.removeAfterReceivePostProcessor(mpp);
 		assertThat(rabbitTemplate.convertSendAndReceive("multi.exch.tx", "multi.rk.tx", bar)).isEqualTo("BAR: barbar");
-		assertThat(rabbitTemplate.convertSendAndReceive("multi.exch.tx", "multi.rk.tx", baz)).isEqualTo("BAZ: bazbaz: multi.rk.tx");
+		assertThat(rabbitTemplate.convertSendAndReceive("multi.exch.tx", "multi.rk.tx", baz))
+				.isEqualTo("BAZ: bazbaz: multi.rk.tx");
+		assertThat(this.multi.bean).isInstanceOf(MultiListenerBean.class);
+		assertThat(this.multi.method).isNotNull();
+		assertThat(this.multi.method.getName()).isEqualTo("baz");
 		assertThat(AopUtils.isJdkDynamicProxy(this.txClassLevel)).isTrue();
 	}
 
@@ -383,7 +413,12 @@ public class EnableRabbitIntegrationTests {
 		Message request = MessageTestUtils.createTextMessage("foo", properties);
 		Message reply = rabbitTemplate.sendAndReceive("test.header", request);
 		assertThat(MessageTestUtils.extractText(reply)).isEqualTo("prefix-FOO");
-		assertThat(Boolean.TRUE).isEqualTo(reply.getMessageProperties().getHeaders().get("replyMPPApplied"));
+		assertThat(reply.getMessageProperties().getHeaders().get("replyMPPApplied")).isEqualTo(Boolean.TRUE);
+		assertThat((String) reply.getMessageProperties().getHeader("bean"))
+				.isEqualTo("MyService");
+		assertThat((String) reply.getMessageProperties().getHeader("method"))
+				.isEqualTo("capitalizeWithHeader");
+		assertThat((String) reply.getMessageProperties().getHeader("prefix")).isEqualTo("prefix-");
 	}
 
 	@Test
@@ -551,18 +586,32 @@ public class EnableRabbitIntegrationTests {
 		assertThat(returned).isInstanceOf(byte[].class);
 		assertThat(new String((byte[]) returned)).isEqualTo("\"bar=baztest.converted.args2\"");
 
+		List<String> beanMethodHeaders = new ArrayList<>();
+		MessagePostProcessor mpp = msg -> {
+			beanMethodHeaders.add(msg.getMessageProperties().getHeader("bean"));
+			beanMethodHeaders.add(msg.getMessageProperties().getHeader("method"));
+			return msg;
+		};
+		template.setAfterReceivePostProcessors(mpp);
 		returned = template.convertSendAndReceive("", "test.converted.message", "{ \"bar\" : \"baz\" }",
 				messagePostProcessor);
 		assertThat(returned).isInstanceOf(byte[].class);
 		assertThat(new String((byte[]) returned)).isEqualTo("\"bar=bazfoo2MessageFoo2Service\"");
+		assertThat(beanMethodHeaders).hasSize(2);
+		assertThat(beanMethodHeaders.get(0)).isEqualTo("Foo2Service");
+		assertThat(beanMethodHeaders.get(1)).isEqualTo("foo2Message");
+		template.removeAfterReceivePostProcessor(mpp);
+		Foo2Service foo2Service = ctx.getBean(Foo2Service.class);
+		assertThat(foo2Service.bean).isInstanceOf(Foo2Service.class);
+		assertThat(foo2Service.method).isNotNull();
+		assertThat(foo2Service.method.getName()).isEqualTo("foo2Message");
 
 		returned = template.convertSendAndReceive("", "test.notconverted.message", "{ \"bar\" : \"baz\" }",
 				messagePostProcessor);
 		assertThat(returned).isInstanceOf(byte[].class);
 		assertThat(new String((byte[]) returned)).isEqualTo("\"fooMessage\"");
-		Foo2Service foo2service = ctx.getBean(Foo2Service.class);
-		assertThat(foo2service.stringHeader).isEqualTo("string");
-		assertThat(foo2service.intHeader).isEqualTo(42);
+		assertThat(foo2Service.stringHeader).isEqualTo("string");
+		assertThat(foo2Service.intHeader).isEqualTo(42);
 
 		returned = template.convertSendAndReceive("", "test.notconverted.channel", "{ \"bar\" : \"baz\" }",
 				messagePostProcessor);
@@ -588,6 +637,11 @@ public class EnableRabbitIntegrationTests {
 				"{ \"bar\" : \"baz\" }", messagePostProcessor);
 		assertThat(returned).isInstanceOf(byte[].class);
 		assertThat(new String((byte[]) returned)).isEqualTo("\"GenericMessageLinkedHashMap\"");
+
+		returned = template.convertSendAndReceive("", "test.projection",
+				"{ \"username\" : \"SomeUsername\", \"user\" : { \"name\" : \"SomeName\"}}", messagePostProcessor);
+		assertThat(returned).isInstanceOf(byte[].class);
+		assertThat(new String((byte[]) returned)).isEqualTo("\"SomeUsernameSomeName\"");
 
 		Jackson2JsonMessageConverter jsonConverter = ctx.getBean(Jackson2JsonMessageConverter.class);
 
@@ -756,6 +810,8 @@ public class EnableRabbitIntegrationTests {
 		catch (Exception e) {
 			assertThat(e.getCause().getMessage()).isEqualTo("from error handler");
 			assertThat(e.getCause().getCause().getMessage()).isEqualTo("return this");
+			EnableRabbitConfig config = this.context.getBean(EnableRabbitConfig.class);
+			assertThat(config.errorHandlerChannel).isNotNull();
 		}
 	}
 
@@ -809,13 +865,31 @@ public class EnableRabbitIntegrationTests {
 	}
 
 	@Test
-	public void messagingMessageReturned() {
+	public void messagingMessageReturned() throws InterruptedException {
 		Message message = org.springframework.amqp.core.MessageBuilder.withBody("\"messaging\"".getBytes())
 			.andProperties(MessagePropertiesBuilder.newInstance().setContentType("application/json").build()).build();
 		message = this.rabbitTemplate.sendAndReceive("test.messaging.message", message);
 		assertThat(message).isNotNull();
 		assertThat(new String(message.getBody())).isEqualTo("{\"field\":\"MESSAGING\"}");
 		assertThat(message.getMessageProperties().getHeaders().get("foo")).isEqualTo("bar");
+		Timer timer = null;
+		int n = 0;
+		while (timer == null && n++ < 100) {
+			try {
+				timer = this.meterRegistry.get("spring.rabbitmq.listener")
+						.tag("listener.id", "list.of.messages")
+						.tag("queue", "test.messaging.message")
+						.tag("result", "success")
+						.tag("exception", "none")
+						.tag("extraTag", "foo")
+						.timer();
+			}
+			catch (@SuppressWarnings("unused") Exception e) {
+				Thread.sleep(100);
+			}
+		}
+		assertThat(timer).isNotNull();
+		assertThat(timer.count()).isEqualTo(1L);
 	}
 
 	@Test
@@ -834,6 +908,34 @@ public class EnableRabbitIntegrationTests {
 		message = this.rabbitTemplate.sendAndReceive("test.bytes.to.string", message);
 		assertThat(message).isNotNull();
 		assertThat(message.getBody()).isEqualTo("BYTES".getBytes());
+	}
+
+	@Test
+	public void testManualOverride() {
+		assertThat(TestUtils.getPropertyValue(this.registry.getListenerContainer("manual.acks.1"), "acknowledgeMode"))
+			.isEqualTo(AcknowledgeMode.MANUAL);
+		assertThat(TestUtils.getPropertyValue(this.registry.getListenerContainer("manual.acks.2"), "acknowledgeMode"))
+			.isEqualTo(AcknowledgeMode.MANUAL);
+	}
+
+	@Test
+	public void testConsumerBatchEnabled() throws InterruptedException {
+		this.rabbitTemplate.convertAndSend("erit.batch.1", "foo");
+		this.rabbitTemplate.convertAndSend("erit.batch.1", "bar");
+		this.rabbitTemplate.convertAndSend("erit.batch.2", "foo");
+		this.rabbitTemplate.convertAndSend("erit.batch.2", "bar");
+		this.rabbitTemplate.convertAndSend("erit.batch.3", "foo");
+		this.rabbitTemplate.convertAndSend("erit.batch.3", "bar");
+		assertThat(this.myService.batch1Latch.await(10, TimeUnit.SECONDS)).isTrue();
+		assertThat(this.myService.batch2Latch.await(10, TimeUnit.SECONDS)).isTrue();
+		assertThat(this.myService.batch3Latch.await(10, TimeUnit.SECONDS)).isTrue();
+		assertThat(this.myService.amqpMessagesReceived).hasSize(2);
+		assertThat(this.myService.amqpMessagesReceived.get(0)).isInstanceOf(Message.class);
+		assertThat(this.myService.messagingMessagesReceived).hasSize(2);
+		assertThat(this.myService.messagingMessagesReceived.get(0))
+				.isInstanceOf(org.springframework.messaging.Message.class);
+		assertThat(this.myService.batch3Strings).hasSize(2);
+		assertThat(this.myService.batch3Strings.get(0)).isInstanceOf(String.class);
 	}
 
 	interface TxService {
@@ -892,9 +994,25 @@ public class EnableRabbitIntegrationTests {
 
 	public static class MyService {
 
-		private final RabbitTemplate txRabbitTemplate;
+		final RabbitTemplate txRabbitTemplate;
 
-		private volatile boolean channelBoundOk;
+		final List<Object> foos = new ArrayList<>();
+
+		final CountDownLatch latch = new CountDownLatch(1);
+
+		final CountDownLatch batch1Latch = new CountDownLatch(1);
+
+		final CountDownLatch batch2Latch = new CountDownLatch(1);
+
+		final CountDownLatch batch3Latch = new CountDownLatch(1);
+
+		volatile Boolean channelBoundOk;
+
+		volatile List<Message> amqpMessagesReceived;
+
+		volatile List<org.springframework.messaging.Message<?>> messagingMessagesReceived;
+
+		volatile List<String> batch3Strings;
 
 		public MyService(RabbitTemplate txRabbitTemplate) {
 			this.txRabbitTemplate = txRabbitTemplate;
@@ -906,9 +1024,7 @@ public class EnableRabbitIntegrationTests {
 				key = "auto.rk"), containerFactory = "txListenerContainerFactory"
 		)
 		public String handleWithDeclare(String foo, Channel channel) {
-			this.channelBoundOk = this.txRabbitTemplate.execute(c -> {
-				return c.equals(channel);
-			});
+			this.channelBoundOk = this.txRabbitTemplate.execute(c -> c.equals(channel));
 			return foo.toUpperCase() + Thread.currentThread().getName();
 		}
 
@@ -975,7 +1091,7 @@ public class EnableRabbitIntegrationTests {
 			return foo.toUpperCase() + foo;
 		}
 
-		@RabbitListener(queues = "test.header", group = "testGroup")
+		@RabbitListener(queues = "test.header", group = "testGroup", replyPostProcessor = "echoPrefixHeader")
 		public String capitalizeWithHeader(@Payload String content, @Header String prefix) {
 			return prefix + content.toUpperCase();
 		}
@@ -1020,10 +1136,6 @@ public class EnableRabbitIntegrationTests {
 		public void handleIt(Date body) {
 
 		}
-
-		private final List<Object> foos = new ArrayList<Object>();
-
-		private final CountDownLatch latch = new CountDownLatch(1);
 
 		@RabbitListener(id = "different", queues = "differentTypes", containerFactory = "jsonListenerContainerFactory")
 		public void handleDifferent(Foo2 foo) {
@@ -1144,7 +1256,8 @@ public class EnableRabbitIntegrationTests {
 			return Collections.singletonMap("key", in);
 		}
 
-		@RabbitListener(queues = "test.messaging.message", containerFactory = "simpleJsonListenerContainerFactory")
+		@RabbitListener(id = "list.of.messages",
+				queues = "test.messaging.message", containerFactory = "simpleJsonListenerContainerFactory")
 		public org.springframework.messaging.Message<Bar> messagingMessage(String in) {
 			Bar bar = new Bar();
 			bar.field = in.toUpperCase();
@@ -1165,6 +1278,42 @@ public class EnableRabbitIntegrationTests {
 			return in.toUpperCase();
 		}
 
+		@RabbitListener(id = "manual.acks.1", queues = "manual.acks.1", ackMode = "MANUAL")
+		public String manual1(String in, Channel channel, @Header(AmqpHeaders.DELIVERY_TAG) long tag)
+				throws IOException {
+
+			channel.basicAck(tag, false);
+			return in.toUpperCase();
+		}
+
+		@RabbitListener(id = "manual.acks.2", queues = "manual.acks.2",
+				ackMode = "#{T(org.springframework.amqp.core.AcknowledgeMode).MANUAL}")
+
+		public String manual2(String in, Channel channel, @Header(AmqpHeaders.DELIVERY_TAG) long tag)
+				throws IOException {
+
+			channel.basicAck(tag, false);
+			return in.toUpperCase();
+		}
+
+		@RabbitListener(queues = "erit.batch.1", containerFactory = "consumerBatchContainerFactory")
+		public void consumerBatch1(List<Message> amqpMessages) {
+			this.amqpMessagesReceived = amqpMessages;
+			this.batch1Latch.countDown();
+		}
+
+		@RabbitListener(queues = "erit.batch.2", containerFactory = "consumerBatchContainerFactory")
+		public void consumerBatch2(List<org.springframework.messaging.Message<?>> messages) {
+			this.messagingMessagesReceived = messages;
+			this.batch2Latch.countDown();
+		}
+
+		@RabbitListener(queues = "erit.batch.3", containerFactory = "consumerBatchContainerFactory")
+		public void consumerBatch3(List<String> strings) {
+			this.batch3Strings = strings;
+			this.batch3Latch.countDown();
+		}
+
 	}
 
 	public static class JsonObject {
@@ -1172,7 +1321,6 @@ public class EnableRabbitIntegrationTests {
 		private String bar;
 
 		public JsonObject() {
-			super();
 		}
 
 		public JsonObject(String bar) {
@@ -1316,6 +1464,8 @@ public class EnableRabbitIntegrationTests {
 
 		private final CountDownLatch noListenerLatch = new CountDownLatch(1);
 
+		private volatile Channel errorHandlerChannel;
+
 		@Bean
 		public ConnectionNameStrategy cns() {
 			return new SimplePropertyValueConnectionNameStrategy("spring.application.name");
@@ -1356,6 +1506,9 @@ public class EnableRabbitIntegrationTests {
 			factory.setReceiveTimeout(10L);
 			factory.setBeforeSendReplyPostProcessors(m -> {
 				m.getMessageProperties().getHeaders().put("replyMPPApplied", true);
+				m.getMessageProperties().setHeader("bean",
+						m.getMessageProperties().getTargetBean().getClass().getSimpleName());
+				m.getMessageProperties().setHeader("method", m.getMessageProperties().getTargetMethod().getName());
 				return m;
 			});
 			factory.setRetryTemplate(new RetryTemplate());
@@ -1417,7 +1570,7 @@ public class EnableRabbitIntegrationTests {
 			factory.setConsumerTagStrategy(consumerTagStrategy());
 			Jackson2JsonMessageConverter messageConverter = new Jackson2JsonMessageConverter();
 			DefaultClassMapper classMapper = new DefaultClassMapper();
-			Map<String, Class<?>> idClassMapping = new HashMap<String, Class<?>>();
+			Map<String, Class<?>> idClassMapping = new HashMap<>();
 			idClassMapping.put(
 					"org.springframework.amqp.rabbit.annotation.EnableRabbitIntegrationTests$Foo1", Foo2.class);
 			classMapper.setIdClassMapping(idClassMapping);
@@ -1426,6 +1579,11 @@ public class EnableRabbitIntegrationTests {
 			factory.setReceiveTimeout(10L);
 			factory.setConcurrentConsumers(2);
 			return factory;
+		}
+
+		@Bean
+		public MeterRegistry meterRegistry() {
+			return new SimpleMeterRegistry();
 		}
 
 		@Bean
@@ -1438,6 +1596,8 @@ public class EnableRabbitIntegrationTests {
 			messageConverter.getJavaTypeMapper().addTrustedPackages("*");
 			factory.setMessageConverter(messageConverter);
 			factory.setReceiveTimeout(10L);
+			factory.setContainerCustomizer(
+					container -> container.setMicrometerTags(Collections.singletonMap("extraTag", "foo")));
 			return factory;
 		}
 
@@ -1452,6 +1612,17 @@ public class EnableRabbitIntegrationTests {
 		}
 
 		@Bean
+		public SimpleRabbitListenerContainerFactory consumerBatchContainerFactory() {
+			SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
+			factory.setConnectionFactory(rabbitConnectionFactory());
+			factory.setConsumerTagStrategy(consumerTagStrategy());
+			factory.setBatchListener(true);
+			factory.setBatchSize(2);
+			factory.setConsumerBatchEnabled(true);
+			return factory;
+		}
+
+		@Bean
 		public String tagPrefix() {
 			return UUID.randomUUID().toString();
 		}
@@ -1460,7 +1631,7 @@ public class EnableRabbitIntegrationTests {
 		public Collection<org.springframework.amqp.core.Queue> commaQueues() {
 			org.springframework.amqp.core.Queue comma3 = new org.springframework.amqp.core.Queue("test.comma.3");
 			org.springframework.amqp.core.Queue comma4 = new org.springframework.amqp.core.Queue("test.comma.4");
-			List<org.springframework.amqp.core.Queue> list = new ArrayList<org.springframework.amqp.core.Queue>();
+			List<org.springframework.amqp.core.Queue> list = new ArrayList<>();
 			list.add(comma3);
 			list.add(comma4);
 			return list;
@@ -1511,13 +1682,22 @@ public class EnableRabbitIntegrationTests {
 
 		@Bean
 		public RabbitListenerErrorHandler alwaysBARHandler() {
-			return (m, sm, e) -> "BAR";
+			return (msg, springMsg, ex) -> "BAR";
+		}
+
+		@Bean
+		public RabbitListenerErrorHandler upcaseAndRepeatErrorHandler() {
+			return (msg, springMsg, ex) -> {
+				String payload = ((Bar) springMsg.getPayload()).field.toUpperCase();
+				return payload + payload + " " + ex.getCause().getMessage();
+ 			};
 		}
 
 		@Bean
 		public RabbitListenerErrorHandler throwANewException() {
-			return (m, sm, e) -> {
-				throw new RuntimeException("from error handler", e.getCause());
+			return (msg, springMsg, ex) -> {
+				this.errorHandlerChannel = springMsg.getHeaders().get(AmqpHeaders.CHANNEL, Channel.class);
+				throw new RuntimeException("from error handler", ex.getCause());
 			};
 		}
 
@@ -1545,6 +1725,7 @@ public class EnableRabbitIntegrationTests {
 
 		@Bean
 		public ConnectionFactory rabbitConnectionFactory() {
+			BrokerRunningSupport brokerRunning = RabbitAvailableCondition.getBrokerRunning();
 			CachingConnectionFactory connectionFactory = new CachingConnectionFactory();
 			connectionFactory.setHost(brokerRunning.getHostName());
 			connectionFactory.setPort(brokerRunning.getPort());
@@ -1597,7 +1778,7 @@ public class EnableRabbitIntegrationTests {
 
 		@Bean
 		public org.springframework.amqp.core.Queue sendToReplies() {
-			return new org.springframework.amqp.core.Queue(sendToRepliesBean(), false, false, true);
+			return new org.springframework.amqp.core.Queue(sendToRepliesBean(), false, false, false);
 		}
 
 		@Bean
@@ -1627,22 +1808,39 @@ public class EnableRabbitIntegrationTests {
 			return directExchange;
 		}
 
+		@Bean
+		public ReplyPostProcessor echoPrefixHeader() {
+			return (req, resp) -> {
+				resp.getMessageProperties().setHeader("prefix", req.getMessageProperties().getHeader("prefix"));
+				return resp;
+			};
+		}
+
 	}
 
 	@RabbitListener(bindings = @QueueBinding
 			(value = @Queue,
 					exchange = @Exchange(value = "multi.exch", autoDelete = "true"),
-					key = "multi.rk"))
+					key = "multi.rk"), errorHandler = "upcaseAndRepeatErrorHandler")
 	static class MultiListenerBean {
+
+		volatile Object bean;
+
+		volatile Method method;
 
 		@RabbitHandler
 		@SendTo("${foo.bar:#{sendToRepliesBean}}")
 		public String bar(@NonNull Bar bar) {
+			if (bar.field.equals("crash")) {
+				throw new RuntimeException("Test reply from error handler");
+			}
 			return "BAR: " + bar.field;
 		}
 
 		@RabbitHandler
-		public String baz(Baz baz) {
+		public String baz(Baz baz, Message message) {
+			this.bean = message.getMessageProperties().getTargetBean();
+			this.method = message.getMessageProperties().getTargetMethod();
 			return "BAZ: " + baz.field;
 		}
 
@@ -1773,6 +1971,13 @@ public class EnableRabbitIntegrationTests {
 			factory.setConnectionFactory(rabbitConnectionFactory());
 			factory.setMessageConverter(jsonConverter());
 			factory.setReceiveTimeout(10L);
+			factory.setBeforeSendReplyPostProcessors(m -> {
+				m.getMessageProperties().setHeader("bean",
+						m.getMessageProperties().getTargetBean().getClass().getSimpleName());
+				m.getMessageProperties().setHeader("method", m.getMessageProperties().getTargetMethod().getName());
+				return m;
+			});
+			factory.setContainerCustomizer(container -> container.setMicrometerEnabled(false));
 			return factory;
 		}
 
@@ -1780,6 +1985,7 @@ public class EnableRabbitIntegrationTests {
 
 		@Bean
 		public ConnectionFactory rabbitConnectionFactory() {
+			BrokerRunningSupport brokerRunning = RabbitAvailableCondition.getBrokerRunning();
 			CachingConnectionFactory connectionFactory = new CachingConnectionFactory();
 			connectionFactory.setHost(brokerRunning.getHostName());
 			connectionFactory.setPort(brokerRunning.getPort());
@@ -1792,6 +1998,7 @@ public class EnableRabbitIntegrationTests {
 		public RabbitTemplate jsonRabbitTemplate() {
 			RabbitTemplate rabbitTemplate = new RabbitTemplate(rabbitConnectionFactory());
 			rabbitTemplate.setMessageConverter(jsonConverter());
+			rabbitTemplate.setReplyTimeout(60_000);
 			return rabbitTemplate;
 		}
 
@@ -1801,6 +2008,7 @@ public class EnableRabbitIntegrationTests {
 			DefaultJackson2JavaTypeMapper mapper = Mockito.spy(TestUtils.getPropertyValue(jackson2JsonMessageConverter,
 					"javaTypeMapper", DefaultJackson2JavaTypeMapper.class));
 			new DirectFieldAccessor(jackson2JsonMessageConverter).setPropertyValue("javaTypeMapper", mapper);
+			jackson2JsonMessageConverter.setUseProjectionForInterfaces(true);
 			return jackson2JsonMessageConverter;
 		}
 
@@ -1858,6 +2066,7 @@ public class EnableRabbitIntegrationTests {
 			factory.setConnectionFactory(rabbitConnectionFactory());
 			factory.setMessageConverter(xmlConverter());
 			factory.setReceiveTimeout(10L);
+			factory.setContainerCustomizer(container -> container.setMicrometerEnabled(false));
 			return factory;
 		}
 
@@ -1865,6 +2074,7 @@ public class EnableRabbitIntegrationTests {
 
 		@Bean
 		public ConnectionFactory rabbitConnectionFactory() {
+			BrokerRunningSupport brokerRunning = RabbitAvailableCondition.getBrokerRunning();
 			CachingConnectionFactory connectionFactory = new CachingConnectionFactory();
 			connectionFactory.setHost(brokerRunning.getHostName());
 			connectionFactory.setPort(brokerRunning.getPort());
@@ -1935,9 +2145,13 @@ public class EnableRabbitIntegrationTests {
 
 	public static class Foo2Service {
 
-		String stringHeader;
+		volatile String stringHeader;
 
-		Integer intHeader;
+		volatile Integer intHeader;
+
+		volatile Object bean;
+
+		volatile Method method;
 
 		@RabbitListener(queues = "test.converted")
 		public Foo2 foo2(Foo2 foo2) {
@@ -1970,6 +2184,8 @@ public class EnableRabbitIntegrationTests {
 
 		@RabbitListener(queues = "test.converted.message")
 		public String foo2Message(@Payload Foo2 foo2, Message message) {
+			this.bean = message.getMessageProperties().getTargetBean();
+			this.method = message.getMessageProperties().getTargetMethod();
 			return foo2.toString() + message.getMessageProperties().getTargetMethod().getName()
 					+ message.getMessageProperties().getTargetBean().getClass().getSimpleName();
 		}
@@ -2009,25 +2225,20 @@ public class EnableRabbitIntegrationTests {
 			return message.getClass().getSimpleName() + message.getPayload().getClass().getSimpleName();
 		}
 
+		@RabbitListener(queues = "test.projection")
+		public String projection(Sample in) {
+			return in.getUsername() + in.getName();
+		}
 	}
 
-	/**
-	 * Defer queue deletion until after the context has been stopped by the
-	 * {@link DirtiesContext}.
-	 *
-	 */
-	public static class DeleteQueuesExecutionListener extends AbstractTestExecutionListener {
+	interface Sample {
 
-		@Override
-		public void afterTestClass(TestContext testContext) {
-			brokerRunning.removeTestQueues("sendTo.replies", "sendTo.replies.spel");
-		}
+		String getUsername();
 
-		@Override
-		public int getOrder() {
-			return Ordered.HIGHEST_PRECEDENCE;
-		}
+		@JsonPath("$.user.name")
+		String getName();
 
 	}
+
 
 }

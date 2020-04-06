@@ -24,16 +24,15 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.ParameterizedTypeReference;
-import org.springframework.test.context.ContextConfiguration;
-import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
+import org.springframework.data.web.JsonPath;
+import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ser.BeanSerializerFactory;
@@ -46,8 +45,7 @@ import com.fasterxml.jackson.databind.ser.BeanSerializerFactory;
  * @author Andreas Asplund
  * @author Artem Bilan
  */
-@ContextConfiguration
-@RunWith(SpringJUnit4ClassRunner.class)
+@SpringJUnitConfig
 public class Jackson2JsonMessageConverterTests {
 
 	public static final String TRUSTED_PACKAGE = Jackson2JsonMessageConverterTests.class.getPackage().getName();
@@ -59,7 +57,7 @@ public class Jackson2JsonMessageConverterTests {
 	@Autowired
 	private Jackson2JsonMessageConverter jsonConverterWithDefaultType;
 
-	@Before
+	@BeforeEach
 	public void before() {
 		converter = new Jackson2JsonMessageConverter(TRUSTED_PACKAGE);
 		trade = new SimpleTrade();
@@ -188,8 +186,9 @@ public class Jackson2JsonMessageConverterTests {
 		byte[] bytes = "{\"name\" : \"foo\" }".getBytes();
 		MessageProperties messageProperties = new MessageProperties();
 		Message message = new Message(bytes, messageProperties);
-		Object foo = jsonConverterWithDefaultType.fromMessage(message);
-		assertThat(new String((byte[]) foo)).isEqualTo(new String(bytes));
+		this.jsonConverterWithDefaultType.setAssumeSupportedContentType(false);
+		Object foo = this.jsonConverterWithDefaultType.fromMessage(message);
+		assertThat(foo).isEqualTo(bytes);
 	}
 
 	@Test
@@ -262,6 +261,42 @@ public class Jackson2JsonMessageConverterTests {
 		Object value = ((Map<?, ?>) map.get("qux")).get("baz");
 		assertThat(value).isInstanceOf(Bar.class);
 		assertThat(((Bar) value).getFoo()).isEqualTo(new Foo("bar"));
+	}
+
+	@Test
+	public void testProjection() {
+		Jackson2JsonMessageConverter conv = new Jackson2JsonMessageConverter();
+		conv.setUseProjectionForInterfaces(true);
+		MessageProperties properties = new MessageProperties();
+		properties.setInferredArgumentType(Sample.class);
+		properties.setContentType("application/json");
+		Message message = new Message(
+				"{ \"username\" : \"SomeUsername\", \"user\" : { \"name\" : \"SomeName\"}}".getBytes(), properties);
+		Object fromMessage = conv.fromMessage(message);
+		assertThat(fromMessage).isInstanceOf(Sample.class);
+		assertThat(((Sample) fromMessage).getUsername()).isEqualTo("SomeUsername");
+		assertThat(((Sample) fromMessage).getName()).isEqualTo("SomeName");
+	}
+
+	@Test
+	public void testMissingContentType() {
+		byte[] bytes = "{\"name\" : \"foo\" }".getBytes();
+		MessageProperties messageProperties = new MessageProperties();
+		Message message = new Message(bytes, messageProperties);
+		Jackson2JsonMessageConverter j2Converter = new Jackson2JsonMessageConverter();
+		DefaultClassMapper classMapper = new DefaultClassMapper();
+		classMapper.setDefaultType(Foo.class);
+		j2Converter.setClassMapper(classMapper);
+		Object foo = j2Converter.fromMessage(message);
+		assertThat(foo).isInstanceOf(Foo.class);
+
+		messageProperties.setContentType(null);
+		foo = j2Converter.fromMessage(message);
+		assertThat(foo).isInstanceOf(Foo.class);
+
+		j2Converter.setAssumeSupportedContentType(false);
+		foo = j2Converter.fromMessage(message);
+		assertThat(foo).isSameAs(bytes);
 	}
 
 	public static class Foo {
@@ -377,6 +412,15 @@ public class Jackson2JsonMessageConverterTests {
 			}
 			return true;
 		}
+
+	}
+
+	interface Sample {
+
+		String getUsername();
+
+		@JsonPath("$.user.name")
+		String getName();
 
 	}
 

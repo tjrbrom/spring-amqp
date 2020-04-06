@@ -21,10 +21,10 @@ import java.util.concurrent.ScheduledFuture;
 
 import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.core.Message;
+import org.springframework.amqp.rabbit.batch.BatchingStrategy;
+import org.springframework.amqp.rabbit.batch.MessageBatch;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
-import org.springframework.amqp.rabbit.core.support.BatchingStrategy;
-import org.springframework.amqp.rabbit.core.support.MessageBatch;
 import org.springframework.scheduling.TaskScheduler;
 
 /**
@@ -76,6 +76,7 @@ public class BatchingRabbitTemplate extends RabbitTemplate {
 	@Override
 	public synchronized void send(String exchange, String routingKey, Message message, CorrelationData correlationData)
 			throws AmqpException {
+
 		if (correlationData != null) {
 			if (logger.isDebugEnabled()) {
 				logger.debug("Cannot use batching with correlation data");

@@ -18,12 +18,14 @@ package org.springframework.amqp.rabbit.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
+import org.springframework.amqp.rabbit.connection.CachingConnectionFactory.ConfirmType;
 import org.springframework.amqp.rabbit.connection.ConnectionNameStrategy;
 import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.beans.DirectFieldAccessor;
@@ -46,7 +48,7 @@ public final class ConnectionFactoryParserTests {
 
 	private DefaultListableBeanFactory beanFactory;
 
-	@Before
+	@BeforeEach
 	public void setUpDefaultBeanFactory() throws Exception {
 		beanFactory = new DefaultListableBeanFactory();
 		XmlBeanDefinitionReader reader = new XmlBeanDefinitionReader(beanFactory);
@@ -60,7 +62,7 @@ public final class ConnectionFactoryParserTests {
 		assertThat(connectionFactory.getChannelCacheSize()).isEqualTo(10);
 		DirectFieldAccessor dfa = new DirectFieldAccessor(connectionFactory);
 		assertThat(dfa.getPropertyValue("executorService")).isNull();
-		assertThat(dfa.getPropertyValue("publisherConfirms")).isEqualTo(Boolean.TRUE);
+		assertThat(dfa.getPropertyValue("confirmType")).isEqualTo(ConfirmType.CORRELATED);
 		assertThat(dfa.getPropertyValue("publisherReturns")).isEqualTo(Boolean.TRUE);
 		assertThat(TestUtils.getPropertyValue(connectionFactory, "rabbitConnectionFactory.requestedHeartbeat")).isEqualTo(123);
 		assertThat(TestUtils.getPropertyValue(connectionFactory, "rabbitConnectionFactory.connectionTimeout")).isEqualTo(789);
@@ -86,7 +88,7 @@ public final class ConnectionFactoryParserTests {
 		ThreadPoolTaskExecutor exec = beanFactory.getBean("exec", ThreadPoolTaskExecutor.class);
 		assertThat(executor).isSameAs(exec.getThreadPoolExecutor());
 		DirectFieldAccessor dfa = new DirectFieldAccessor(connectionFactory);
-		assertThat(dfa.getPropertyValue("publisherConfirms")).isEqualTo(Boolean.FALSE);
+		assertThat(dfa.getPropertyValue("confirmType")).isEqualTo(ConfirmType.NONE);
 		assertThat(dfa.getPropertyValue("publisherReturns")).isEqualTo(Boolean.FALSE);
 		assertThat(connectionFactory.getCacheMode()).isEqualTo(CachingConnectionFactory.CacheMode.CONNECTION);
 		assertThat(TestUtils.getPropertyValue(connectionFactory, "rabbitConnectionFactory.connectionTimeout")).isEqualTo(new ConnectionFactory().getConnectionTimeout());
@@ -102,6 +104,8 @@ public final class ConnectionFactoryParserTests {
 		assertThat(executor).isNotNull();
 		ExecutorService exec = beanFactory.getBean("execService", ExecutorService.class);
 		assertThat(executor).isSameAs(exec);
+		DirectFieldAccessor dfa = new DirectFieldAccessor(connectionFactory);
+		assertThat(dfa.getPropertyValue("confirmType")).isEqualTo(ConfirmType.SIMPLE);
 	}
 
 	@Test
@@ -110,14 +114,16 @@ public final class ConnectionFactoryParserTests {
 		assertThat(connectionFactory).isNotNull();
 		assertThat(connectionFactory.getChannelCacheSize()).isEqualTo(10);
 		DirectFieldAccessor dfa =  new DirectFieldAccessor(connectionFactory);
-		Address[] addresses = (Address[]) dfa.getPropertyValue("addresses");
-		assertThat(addresses.length).isEqualTo(3);
-		assertThat(addresses[0].getHost()).isEqualTo("host1");
-		assertThat(addresses[0].getPort()).isEqualTo(1234);
-		assertThat(addresses[1].getHost()).isEqualTo("host2");
-		assertThat(addresses[1].getPort()).isEqualTo(-1);
-		assertThat(addresses[2].getHost()).isEqualTo("host3");
-		assertThat(addresses[2].getPort()).isEqualTo(4567);
+		@SuppressWarnings("unchecked")
+		List<Address> addresses = (List<Address>) dfa.getPropertyValue("addresses");
+		assertThat(addresses).hasSize(3);
+		assertThat(addresses.get(0).getHost()).isEqualTo("host1");
+		assertThat(addresses.get(0).getPort()).isEqualTo(1234);
+		assertThat(addresses.get(1).getHost()).isEqualTo("host2");
+		assertThat(addresses.get(1).getPort()).isEqualTo(-1);
+		assertThat(addresses.get(2).getHost()).isEqualTo("host3");
+		assertThat(addresses.get(2).getPort()).isEqualTo(4567);
+		assertThat(dfa.getPropertyValue("shuffleAddresses")).isEqualTo(Boolean.TRUE);
 		assertThat(TestUtils.getPropertyValue(connectionFactory,
 				"rabbitConnectionFactory.threadFactory")).isSameAs(beanFactory.getBean("tf"));
 	}

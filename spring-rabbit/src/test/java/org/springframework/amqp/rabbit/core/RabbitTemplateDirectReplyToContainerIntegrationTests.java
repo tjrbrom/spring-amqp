@@ -26,14 +26,14 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
-import org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException;
+import org.springframework.amqp.rabbit.support.ListenerExecutionFailedException;
 import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.util.ErrorHandler;
 
@@ -48,7 +48,7 @@ public class RabbitTemplateDirectReplyToContainerIntegrationTests extends Rabbit
 	protected RabbitTemplate createSendAndReceiveRabbitTemplate(ConnectionFactory connectionFactory) {
 		RabbitTemplate rabbitTemplate = super.createSendAndReceiveRabbitTemplate(connectionFactory);
 		rabbitTemplate.setUseDirectReplyToContainer(true);
-		rabbitTemplate.setBeanName(this.testName.getMethodName() + "SendReceiveRabbitTemplate");
+		rabbitTemplate.setBeanName(this.testName + ".SendReceiveRabbitTemplate");
 		return rabbitTemplate;
 	}
 

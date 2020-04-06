@@ -23,7 +23,7 @@ import static org.mockito.Mockito.mock;
 import java.util.Collection;
 import java.util.Map;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
@@ -206,7 +206,7 @@ public abstract class AbstractRabbitAnnotationDrivenTests {
 	 * Test for {@link ValidationBean} with a validator ({@link TestValidator}) specified
 	 * in a custom {@link org.springframework.messaging.handler.annotation.support.DefaultMessageHandlerMethodFactory}.
 	 *
-	 * The test should throw a {@link org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException}
+	 * The test should throw a {@link org.springframework.amqp.rabbit.support.ListenerExecutionFailedException}
 	 */
 	public void testRabbitHandlerMethodFactoryConfiguration(ApplicationContext context) throws Exception {
 		RabbitListenerContainerTestFactory simpleFactory =

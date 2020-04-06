@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,12 +17,16 @@
 package org.springframework.amqp.rabbit.connection;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.fail;
-import static org.mockito.AdditionalMatchers.aryEq;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.BDDMockito.given;
 import static org.mockito.BDDMockito.willAnswer;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
@@ -31,6 +35,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -49,26 +54,35 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import org.apache.commons.logging.Log;
-import org.junit.Ignore;
-import org.junit.Test;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
 import org.springframework.amqp.AmqpConnectException;
 import org.springframework.amqp.AmqpTimeoutException;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory.CacheMode;
+import org.springframework.amqp.rabbit.connection.CachingConnectionFactory.ConfirmType;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.utils.test.TestUtils;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import com.rabbitmq.client.Address;
 import com.rabbitmq.client.Channel;
+import com.rabbitmq.client.ConfirmListener;
 import com.rabbitmq.client.ConnectionFactory;
 import com.rabbitmq.client.GetResponse;
 import com.rabbitmq.client.ShutdownSignalException;
@@ -570,6 +584,122 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		verify(mockChannel1, never()).close();
 
 		ccf.destroy();
+	}
+
+	@Test
+	public void testCheckoutLimitWithPublisherConfirmsLogical() throws IOException, Exception {
+		testCheckoutLimitWithPublisherConfirms(false);
+	}
+
+	@Test
+	public void testCheckoutLimitWithPublisherConfirmsPhysical() throws IOException, Exception {
+		testCheckoutLimitWithPublisherConfirms(true);
+	}
+
+	private void testCheckoutLimitWithPublisherConfirms(boolean physicalClose) throws IOException, Exception {
+		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
+		com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
+		Channel mockChannel = mock(Channel.class);
+
+		when(mockConnectionFactory.newConnection(any(ExecutorService.class), anyString())).thenReturn(mockConnection);
+		when(mockConnection.createChannel()).thenReturn(mockChannel);
+		when(mockConnection.isOpen()).thenReturn(true);
+
+		// Called during physical close
+		when(mockChannel.isOpen()).thenReturn(true);
+		CountDownLatch confirmsLatch = new CountDownLatch(1);
+		doAnswer(invoc -> {
+			confirmsLatch.await(10, TimeUnit.SECONDS);
+			return null;
+		}).when(mockChannel).waitForConfirmsOrDie(anyLong());
+		AtomicReference<ConfirmListener> confirmListener = new AtomicReference<>();
+		doAnswer(invoc -> {
+			confirmListener.set(invoc.getArgument(0));
+			return null;
+		}).when(mockChannel).addConfirmListener(any());
+		when(mockChannel.getNextPublishSeqNo()).thenReturn(1L);
+
+		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ExecutorService exec = Executors.newCachedThreadPool();
+		ccf.setExecutor(exec);
+		ccf.setChannelCacheSize(1);
+		ccf.setChannelCheckoutTimeout(1);
+		ccf.setPublisherConfirmType(ConfirmType.CORRELATED);
+
+		final Connection con = ccf.createConnection();
+
+		RabbitTemplate rabbitTemplate = new RabbitTemplate(ccf);
+		if (physicalClose) {
+			Channel channel1 = con.createChannel(false);
+			RabbitUtils.setPhysicalCloseRequired(channel1, physicalClose);
+			channel1.close();
+		}
+		else {
+			rabbitTemplate.convertAndSend("foo", "bar"); // pending confirm
+		}
+		assertThatThrownBy(() -> con.createChannel(false)).isInstanceOf(AmqpTimeoutException.class);
+		int n = 0;
+		if (physicalClose) {
+			confirmsLatch.countDown();
+			Channel channel2 = null;
+			while (channel2 == null && n++ < 100) {
+				try {
+					channel2 = con.createChannel(false);
+				}
+				catch (Exception e) {
+					Thread.sleep(100);
+				}
+			}
+			assertThat(channel2).isNotNull();
+		}
+		else {
+			confirmListener.get().handleAck(1L, false);
+			boolean ok = false;
+			while (!ok && n++ < 100) {
+				try {
+					rabbitTemplate.convertAndSend("foo", "bar");
+					ok = true;
+				}
+				catch (Exception e) {
+					Thread.sleep(100);
+				}
+			}
+			assertThat(ok).isTrue();
+		}
+		exec.shutdownNow();
+	}
+
+	@Test
+	public void testCheckoutLimitWithPublisherConfirmsLogicalAlreadyCloses() throws IOException, Exception {
+		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
+		com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
+		Channel mockChannel = mock(Channel.class);
+
+		when(mockConnectionFactory.newConnection(any(ExecutorService.class), anyString())).thenReturn(mockConnection);
+		when(mockConnection.createChannel()).thenReturn(mockChannel);
+		when(mockConnection.isOpen()).thenReturn(true);
+
+		AtomicBoolean open = new AtomicBoolean(true);
+		doAnswer(invoc -> {
+			return open.get();
+		}).when(mockChannel).isOpen();
+		when(mockChannel.getNextPublishSeqNo()).thenReturn(1L);
+		doAnswer(invoc -> {
+			open.set(false); // so the logical close detects a closed delegate
+			return null;
+		}).when(mockChannel).basicPublish(any(), any(), anyBoolean(),  any(), any());
+
+		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
+		ccf.setChannelCacheSize(1);
+		ccf.setChannelCheckoutTimeout(1);
+		ccf.setPublisherConfirmType(ConfirmType.CORRELATED);
+
+		RabbitTemplate rabbitTemplate = new RabbitTemplate(ccf);
+		rabbitTemplate.convertAndSend("foo", "bar");
+		open.set(true);
+		rabbitTemplate.convertAndSend("foo", "bar");
+		verify(mockChannel, times(2)).basicPublish(any(), any(), anyBoolean(),  any(), any());
 	}
 
 	@Test
@@ -1436,7 +1566,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		testConsumerChannelPhysicallyClosedWhenNotIsOpenGuts(true);
 	}
 
-	public void testConsumerChannelPhysicallyClosedWhenNotIsOpenGuts(boolean confirms) throws Exception {
+	private void testConsumerChannelPhysicallyClosedWhenNotIsOpenGuts(boolean confirms) throws Exception {
 		ExecutorService executor = Executors.newSingleThreadExecutor();
 		try {
 			com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
@@ -1450,7 +1580,9 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 
 			CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
 			ccf.setExecutor(executor);
-			ccf.setPublisherConfirms(confirms);
+			if (confirms) {
+				ccf.setPublisherConfirmType(ConfirmType.CORRELATED);
+			}
 			Connection con = ccf.createConnection();
 
 			Channel channel = con.createChannel(false);
@@ -1513,7 +1645,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		ccf.createConnection();
 		verify(mock).isAutomaticRecoveryEnabled();
 		verify(mock)
-				.newConnection(isNull(), aryEq(new Address[] { new Address("mq1") }), anyString());
+				.newConnection(isNull(), eq(Collections.singletonList(new Address("mq1"))), anyString());
 		verifyNoMoreInteractions(mock);
 	}
 
@@ -1527,7 +1659,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		verify(mock).isAutomaticRecoveryEnabled();
 		verify(mock).setAutomaticRecoveryEnabled(false);
 		verify(mock).newConnection(isNull(),
-				aryEq(new Address[] { new Address("mq1"), new Address("mq2") }), anyString());
+				eq(Arrays.asList(new Address("mq1"), new Address("mq2"))), anyString());
 		verifyNoMoreInteractions(mock);
 	}
 
@@ -1579,7 +1711,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 	}
 
 	@Test
-	@Ignore // Test to verify log message is suppressed after patch to CCF
+	@Disabled // Test to verify log message is suppressed after patch to CCF
 	public void testReturnsNormalCloseDeferredClose() throws Exception {
 		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
 		com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
@@ -1603,6 +1735,115 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		channel.close();
 		RabbitUtils.setPhysicalCloseRequired(channel, false);
 		Thread.sleep(6000);
+	}
+
+	@Test
+	public void testOrderlyShutDown() throws Exception {
+		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
+		com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
+		Channel mockChannel = mock(Channel.class);
+
+		given(mockConnectionFactory.newConnection((ExecutorService) isNull(), anyString())).willReturn(mockConnection);
+		given(mockConnection.createChannel()).willReturn(mockChannel);
+		given(mockChannel.isOpen()).willReturn(true);
+		given(mockConnection.isOpen()).willReturn(true);
+
+		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setPublisherConfirmType(ConfirmType.CORRELATED);
+		ApplicationContext ac = mock(ApplicationContext.class);
+		ccf.setApplicationContext(ac);
+		PublisherCallbackChannel pcc = mock(PublisherCallbackChannel.class);
+		given(pcc.isOpen()).willReturn(true);
+		CountDownLatch asyncClosingLatch = new CountDownLatch(1);
+		willAnswer(invoc -> {
+			asyncClosingLatch.countDown();
+			return null;
+		}).given(pcc).waitForConfirmsOrDie(anyLong());
+		AtomicReference<ExecutorService> executor = new AtomicReference<>();
+		AtomicBoolean rejected = new AtomicBoolean(true);
+		CountDownLatch closeLatch = new CountDownLatch(1);
+		ccf.setPublisherChannelFactory((channel, exec) -> {
+			executor.set(spy(exec));
+			return pcc;
+		});
+		willAnswer(invoc -> {
+			try {
+				executor.get().execute(() -> {
+				});
+				rejected.set(false);
+			}
+			catch (@SuppressWarnings("unused") RejectedExecutionException e) {
+				rejected.set(true);
+			}
+			closeLatch.countDown();
+			return null;
+		}).given(pcc).close();
+		Channel channel = ccf.createConnection().createChannel(false);
+		ExecutorService closeExec = Executors.newSingleThreadExecutor();
+		closeExec.execute(() -> {
+			RabbitUtils.setPhysicalCloseRequired(channel, true);
+			try {
+				channel.close();
+			}
+			catch (@SuppressWarnings("unused") IOException | TimeoutException e) {
+				// ignore
+			}
+		});
+		assertThat(asyncClosingLatch.await(10, TimeUnit.SECONDS)).isTrue();
+		ccf.onApplicationEvent(new ContextClosedEvent(ac));
+		ccf.destroy();
+		assertThat(closeLatch.await(10, TimeUnit.SECONDS)).isTrue();
+		assertThat(rejected.get()).isFalse();
+		closeExec.shutdownNow();
+	}
+
+	@Test
+	public void testFirstConnectionDoesntWait() throws IOException, TimeoutException {
+		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
+		com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
+		Channel mockChannel = mock(Channel.class);
+
+		given(mockConnectionFactory.newConnection((ExecutorService) isNull(), anyString())).willReturn(mockConnection);
+		given(mockConnection.createChannel()).willReturn(mockChannel);
+		given(mockChannel.isOpen()).willReturn(true);
+		given(mockConnection.isOpen()).willReturn(true);
+
+		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setCacheMode(CacheMode.CONNECTION);
+		ccf.setChannelCheckoutTimeout(60000);
+		long t1 = System.currentTimeMillis();
+		ccf.createConnection();
+		assertThat(System.currentTimeMillis() - t1).isLessThan(30_000);
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	public void testShuffle() throws IOException, TimeoutException {
+		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
+		com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
+		Channel mockChannel = mock(Channel.class);
+
+		given(mockConnectionFactory.newConnection((ExecutorService) isNull(), any(List.class), anyString()))
+			.willReturn(mockConnection);
+		given(mockConnection.createChannel()).willReturn(mockChannel);
+		given(mockChannel.isOpen()).willReturn(true);
+		given(mockConnection.isOpen()).willReturn(true);
+
+		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setCacheMode(CacheMode.CONNECTION);
+		ccf.setAddresses("host1:5672,host2:5672,host3:5672");
+		ccf.setShuffleAddresses(true);
+		IntStream.range(0, 100).forEach(i -> ccf.createConnection());
+		ccf.destroy();
+		ArgumentCaptor<List<Address>> captor = ArgumentCaptor.forClass(List.class);
+		verify(mockConnectionFactory, times(100)).newConnection(isNull(), captor.capture(), anyString());
+		List<String> firstAddress = captor.getAllValues()
+			.stream()
+			.map(addresses -> addresses.get(0).getHost())
+			.distinct()
+			.sorted()
+			.collect(Collectors.toList());
+		assertThat(firstAddress).containsExactly("host1", "host2", "host3");
 	}
 
 }

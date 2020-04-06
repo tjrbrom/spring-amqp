@@ -31,14 +31,14 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.Deflater;
 
 import org.apache.commons.logging.Log;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import org.springframework.amqp.AmqpException;
@@ -47,17 +47,21 @@ import org.springframework.amqp.core.MessageDeliveryMode;
 import org.springframework.amqp.core.MessageListener;
 import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.core.MessageProperties;
+import org.springframework.amqp.rabbit.batch.BatchingStrategy;
+import org.springframework.amqp.rabbit.batch.SimpleBatchingStrategy;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
-import org.springframework.amqp.rabbit.core.support.BatchingStrategy;
-import org.springframework.amqp.rabbit.core.support.SimpleBatchingStrategy;
-import org.springframework.amqp.rabbit.junit.BrokerRunning;
 import org.springframework.amqp.rabbit.junit.BrokerTestUtils;
+import org.springframework.amqp.rabbit.junit.RabbitAvailable;
+import org.springframework.amqp.rabbit.junit.RabbitAvailableCondition;
 import org.springframework.amqp.rabbit.listener.ConditionalRejectingErrorHandler;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
+import org.springframework.amqp.support.AmqpHeaders;
 import org.springframework.amqp.support.postprocessor.AbstractCompressingPostProcessor;
+import org.springframework.amqp.support.postprocessor.DeflaterPostProcessor;
 import org.springframework.amqp.support.postprocessor.DelegatingDecompressingPostProcessor;
 import org.springframework.amqp.support.postprocessor.GUnzipPostProcessor;
 import org.springframework.amqp.support.postprocessor.GZipPostProcessor;
+import org.springframework.amqp.support.postprocessor.InflaterPostProcessor;
 import org.springframework.amqp.support.postprocessor.UnzipPostProcessor;
 import org.springframework.amqp.support.postprocessor.ZipPostProcessor;
 import org.springframework.amqp.utils.test.TestUtils;
@@ -70,22 +74,21 @@ import org.springframework.util.StopWatch;
  * @author Gary Russell
  * @author Artem Bilan
  * @author Mohammad Hewedy
+ * @author David Diehl
  *
  * @since 1.4.1
  *
  */
+@RabbitAvailable(queues = BatchingRabbitTemplateTests.ROUTE)
 public class BatchingRabbitTemplateTests {
 
-	private static final String ROUTE = "test.queue";
-
-	@Rule
-	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(ROUTE);
+	public static final String ROUTE = "test.queue.BatchingRabbitTemplateTests";
 
 	private CachingConnectionFactory connectionFactory;
 
 	private ThreadPoolTaskScheduler scheduler;
 
-	@Before
+	@BeforeEach
 	public void setup() {
 		this.connectionFactory = new CachingConnectionFactory();
 		this.connectionFactory.setHost("localhost");
@@ -95,9 +98,9 @@ public class BatchingRabbitTemplateTests {
 		scheduler.initialize();
 	}
 
-	@After
+	@AfterEach
 	public void tearDown() {
-		this.brokerIsRunning.removeTestQueues();
+		RabbitAvailableCondition.getBrokerRunning().purgeTestQueues();
 		this.connectionFactory.destroy();
 	}
 
@@ -227,8 +230,12 @@ public class BatchingRabbitTemplateTests {
 		final CountDownLatch latch = new CountDownLatch(2);
 		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(this.connectionFactory);
 		container.setQueueNames(ROUTE);
+		List<Boolean> lastInBatch = new ArrayList<>();
+		AtomicInteger batchSize = new AtomicInteger();
 		container.setMessageListener((MessageListener) message -> {
 			received.add(message);
+			lastInBatch.add(message.getMessageProperties().isLastInBatch());
+			batchSize.set(message.getMessageProperties().getHeader(AmqpHeaders.BATCH_SIZE));
 			latch.countDown();
 		});
 		container.setReceiveTimeout(100);
@@ -247,8 +254,11 @@ public class BatchingRabbitTemplateTests {
 			assertThat(received).hasSize(2);
 			assertThat(new String(received.get(0).getBody())).isEqualTo("foo");
 			assertThat(received.get(0).getMessageProperties().getContentLength()).isEqualTo(3);
+			assertThat(lastInBatch.get(0)).isFalse();
 			assertThat(new String(received.get(1).getBody())).isEqualTo("bar");
 			assertThat(received.get(0).getMessageProperties().getContentLength()).isEqualTo(3);
+			assertThat(lastInBatch.get(1)).isTrue();
+			assertThat(batchSize.get()).isEqualTo(2);
 		}
 		finally {
 			container.stop();
@@ -268,7 +278,7 @@ public class BatchingRabbitTemplateTests {
 		});
 		container.setReceiveTimeout(100);
 		container.setPrefetchCount(1000);
-		container.setTxSize(1000);
+		container.setBatchSize(1000);
 		container.afterPropertiesSet();
 		container.start();
 		try {
@@ -507,6 +517,68 @@ public class BatchingRabbitTemplateTests {
 		assertThat(message.getMessageProperties().getContentEncoding()).isEqualTo("zip:foo");
 		UnzipPostProcessor unzipper = new UnzipPostProcessor();
 		message = unzipper.postProcessMessage(message);
+		assertThat(new String(message.getBody())).isEqualTo("\u0000\u0000\u0000\u0003foo\u0000\u0000\u0000\u0003bar");
+	}
+
+	@Test
+	public void testSimpleBatchDeflater() throws Exception {
+		BatchingStrategy batchingStrategy = new SimpleBatchingStrategy(2, Integer.MAX_VALUE, 30000);
+		BatchingRabbitTemplate template = new BatchingRabbitTemplate(batchingStrategy, this.scheduler);
+		template.setConnectionFactory(this.connectionFactory);
+		DeflaterPostProcessor deflaterPostProcessor = new DeflaterPostProcessor();
+		assertThat(getStreamLevel(deflaterPostProcessor)).isEqualTo(Deflater.BEST_SPEED);
+		template.setBeforePublishPostProcessors(deflaterPostProcessor);
+		MessageProperties props = new MessageProperties();
+		Message message = new Message("foo".getBytes(), props);
+		template.send("", ROUTE, message);
+		message = new Message("bar".getBytes(), props);
+		template.send("", ROUTE, message);
+		message = receive(template);
+		assertThat(message.getMessageProperties().getContentEncoding()).isEqualTo("deflate");
+		InflaterPostProcessor inflater = new InflaterPostProcessor();
+		message = inflater.postProcessMessage(message);
+		assertThat(new String(message.getBody())).isEqualTo("\u0000\u0000\u0000\u0003foo\u0000\u0000\u0000\u0003bar");
+	}
+
+	@Test
+	public void testSimpleBatchDeflaterBestCompression() throws Exception {
+		BatchingStrategy batchingStrategy = new SimpleBatchingStrategy(2, Integer.MAX_VALUE, 30000);
+		BatchingRabbitTemplate template = new BatchingRabbitTemplate(batchingStrategy, this.scheduler);
+		template.setConnectionFactory(this.connectionFactory);
+		DeflaterPostProcessor deflaterPostProcessor = new DeflaterPostProcessor();
+		deflaterPostProcessor.setLevel(Deflater.BEST_COMPRESSION);
+		assertThat(getStreamLevel(deflaterPostProcessor)).isEqualTo(Deflater.BEST_COMPRESSION);
+		template.setBeforePublishPostProcessors(deflaterPostProcessor);
+		MessageProperties props = new MessageProperties();
+		Message message = new Message("foo".getBytes(), props);
+		template.send("", ROUTE, message);
+		message = new Message("bar".getBytes(), props);
+		template.send("", ROUTE, message);
+		message = receive(template);
+		assertThat(message.getMessageProperties().getContentEncoding()).isEqualTo("deflate");
+		InflaterPostProcessor inflater = new InflaterPostProcessor();
+		message = inflater.postProcessMessage(message);
+		assertThat(new String(message.getBody())).isEqualTo("\u0000\u0000\u0000\u0003foo\u0000\u0000\u0000\u0003bar");
+	}
+
+	@Test
+	public void testSimpleBatchDeflaterWithEncoding() throws Exception {
+		BatchingStrategy batchingStrategy = new SimpleBatchingStrategy(2, Integer.MAX_VALUE, 30000);
+		BatchingRabbitTemplate template = new BatchingRabbitTemplate(batchingStrategy, this.scheduler);
+		template.setConnectionFactory(this.connectionFactory);
+		DeflaterPostProcessor deflaterPostProcessor = new DeflaterPostProcessor();
+		assertThat(getStreamLevel(deflaterPostProcessor)).isEqualTo(Deflater.BEST_SPEED);
+		template.setBeforePublishPostProcessors(deflaterPostProcessor);
+		MessageProperties props = new MessageProperties();
+		props.setContentEncoding("foo");
+		Message message = new Message("foo".getBytes(), props);
+		template.send("", ROUTE, message);
+		message = new Message("bar".getBytes(), props);
+		template.send("", ROUTE, message);
+		message = receive(template);
+		assertThat(message.getMessageProperties().getContentEncoding()).isEqualTo("deflate:foo");
+		InflaterPostProcessor inflater = new InflaterPostProcessor();
+		message = inflater.postProcessMessage(message);
 		assertThat(new String(message.getBody())).isEqualTo("\u0000\u0000\u0000\u0003foo\u0000\u0000\u0000\u0003bar");
 	}
 
