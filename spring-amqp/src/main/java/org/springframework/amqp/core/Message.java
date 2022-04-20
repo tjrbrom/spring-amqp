@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2020 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,16 +16,11 @@
 
 package org.springframework.amqp.core;
 
-import java.io.ByteArrayInputStream;
 import java.io.Serializable;
 import java.nio.charset.Charset;
 import java.util.Arrays;
-import java.util.LinkedHashSet;
-import java.util.Set;
 
-import org.springframework.amqp.utils.SerializationUtils;
 import org.springframework.util.Assert;
-import org.springframework.util.ClassUtils;
 
 /**
  * The 0-8 and 0-9-1 AMQP specifications do not define an Message class or interface. Instead, when performing an
@@ -48,35 +43,45 @@ public class Message implements Serializable {
 
 	private static final String DEFAULT_ENCODING = Charset.defaultCharset().name();
 
-	private static final Set<String> whiteListPatterns = // NOSONAR lower case static
-			new LinkedHashSet<>(Arrays.asList("java.util.*", "java.lang.*"));
+	private static final int DEFAULT_MAX_BODY_LENGTH = 50;
 
 	private static String bodyEncoding = DEFAULT_ENCODING;
+
+	private static int maxBodyLength = DEFAULT_MAX_BODY_LENGTH;
 
 	private final MessageProperties messageProperties;
 
 	private final byte[] body;
 
+	/**
+	 * Construct an instance with the provided body and default {@link MessageProperties}.
+	 * @param body the body.
+	 * @since 2.2.17
+	 */
+	public Message(byte[] body) {
+		this(body, new MessageProperties());
+	}
+
+	/**
+	 * Construct an instance with the provided body and properties.
+	 * @param body the body.
+	 * @param messageProperties the properties.
+	 */
 	public Message(byte[] body, MessageProperties messageProperties) { //NOSONAR
+		Assert.notNull(body, "'body' cannot be null");
+		Assert.notNull(messageProperties, "'messageProperties' cannot be null");
 		this.body = body; //NOSONAR
 		this.messageProperties = messageProperties;
 	}
 
 	/**
-	 * Add patterns to the white list of permissable package/class name patterns for
-	 * deserialization in {@link #toString()}.
-	 * The patterns will be applied in order until a match is found.
-	 * A class can be fully qualified or a wildcard '*' is allowed at the
-	 * beginning or end of the class name.
-	 * Examples: {@code com.foo.*}, {@code *.MyClass}.
-	 * By default, only {@code java.util} and {@code java.lang} classes will be
-	 * deserialized.
+	 * No longer used.
 	 * @param patterns the patterns.
 	 * @since 1.5.7
+	 * @deprecated toString() no longer deserializes the body.
 	 */
-	public static void addWhiteListPatterns(String... patterns) {
-		Assert.notNull(patterns, "'patterns' cannot be null");
-		whiteListPatterns.addAll(Arrays.asList(patterns));
+	@Deprecated
+	public static void addAllowedListPatterns(String... patterns) {
 	}
 
 	/**
@@ -88,6 +93,16 @@ public class Message implements Serializable {
 	public static void setDefaultEncoding(String encoding) {
 		Assert.notNull(encoding, "'encoding' cannot be null");
 		bodyEncoding = encoding;
+	}
+
+	/**
+	 * Set the maximum length of a test message body to render as a String in
+	 * {@link #toString()}. Default 50.
+	 * @param length the length to render.
+	 * @since 2.2.20
+	 */
+	public static void setMaxBodyLength(int length) {
+		maxBodyLength = length;
 	}
 
 	public byte[] getBody() {
@@ -103,29 +118,23 @@ public class Message implements Serializable {
 		StringBuilder buffer = new StringBuilder();
 		buffer.append("(");
 		buffer.append("Body:'").append(this.getBodyContentAsString()).append("'");
-		if (this.messageProperties != null) {
-			buffer.append(" ").append(this.messageProperties.toString());
-		}
+		buffer.append(" ").append(this.messageProperties.toString());
 		buffer.append(")");
 		return buffer.toString();
 	}
 
 	private String getBodyContentAsString() {
-		if (this.body == null) {
-			return null;
-		}
 		try {
-			boolean nullProps = this.messageProperties == null;
-			String contentType = nullProps ? null : this.messageProperties.getContentType();
+			String contentType = this.messageProperties.getContentType();
 			if (MessageProperties.CONTENT_TYPE_SERIALIZED_OBJECT.equals(contentType)) {
-				return SerializationUtils.deserialize(new ByteArrayInputStream(this.body), whiteListPatterns,
-						ClassUtils.getDefaultClassLoader()).toString();
+				return "[serialized object]";
 			}
-			String encoding = encoding(nullProps);
-			if (MessageProperties.CONTENT_TYPE_TEXT_PLAIN.equals(contentType)
+			String encoding = encoding();
+			if (this.body.length <= maxBodyLength // NOSONAR
+					&& (MessageProperties.CONTENT_TYPE_TEXT_PLAIN.equals(contentType)
 					|| MessageProperties.CONTENT_TYPE_JSON.equals(contentType)
 					|| MessageProperties.CONTENT_TYPE_JSON_ALT.equals(contentType)
-					|| MessageProperties.CONTENT_TYPE_XML.equals(contentType)) {
+					|| MessageProperties.CONTENT_TYPE_XML.equals(contentType))) {
 				return new String(this.body, encoding);
 			}
 		}
@@ -136,8 +145,8 @@ public class Message implements Serializable {
 		return this.body.toString() + "(byte[" + this.body.length + "])"; //NOSONAR
 	}
 
-	private String encoding(boolean nullProps) {
-		String encoding = nullProps ? null : this.messageProperties.getContentEncoding();
+	private String encoding() {
+		String encoding = this.messageProperties.getContentEncoding();
 		if (encoding == null) {
 			encoding = bodyEncoding;
 		}

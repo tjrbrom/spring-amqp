@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.fail;
+import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -32,8 +33,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyZeroInteractions;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -149,19 +149,11 @@ public class RabbitAdminTests {
 		try {
 			rabbitAdmin.declareQueue(new Queue(queueName));
 			new RabbitTemplate(connectionFactory).convertAndSend(queueName, "foo");
-			int n = 0;
-			while (n++ < 100 && messageCount(rabbitAdmin, queueName) == 0) {
-				Thread.sleep(100);
-			}
-			assertThat(n < 100).as("Message count = 0").isTrue();
+			await("Message count = 0").until(() -> messageCount(rabbitAdmin, queueName) > 0);
 			Channel channel = connectionFactory.createConnection().createChannel(false);
 			DefaultConsumer consumer = new DefaultConsumer(channel);
 			channel.basicConsume(queueName, true, consumer);
-			n = 0;
-			while (n++ < 100 && messageCount(rabbitAdmin, queueName) > 0) {
-				Thread.sleep(100);
-			}
-			assertThat(n < 100).as("Message count > 0").isTrue();
+			await("Message count > 0").until(() -> messageCount(rabbitAdmin, queueName) == 0);
 			Properties props = rabbitAdmin.getQueueProperties(queueName);
 			assertThat(props.get(RabbitAdmin.QUEUE_CONSUMER_COUNT)).isNotNull();
 			assertThat(props.get(RabbitAdmin.QUEUE_CONSUMER_COUNT)).isEqualTo(1);
@@ -191,12 +183,12 @@ public class RabbitAdminTests {
 			queues.put("adQ", new Queue("testq.ad", true, false, true));
 			queues.put("exclQ", new Queue("testq.excl", true, true, false));
 			queues.put("allQ", new Queue("testq.all", false, true, true));
-			when(ctx.getBeansOfType(Queue.class)).thenReturn(queues);
+			given(ctx.getBeansOfType(Queue.class)).willReturn(queues);
 			Map<String, Exchange> exchanges = new HashMap<String, Exchange>();
 			exchanges.put("nonDurEx", new DirectExchange("testex.nonDur", false, false));
 			exchanges.put("adEx", new DirectExchange("testex.ad", true, true));
 			exchanges.put("allEx", new DirectExchange("testex.all", false, true));
-			when(ctx.getBeansOfType(Exchange.class)).thenReturn(exchanges);
+			given(ctx.getBeansOfType(Exchange.class)).willReturn(exchanges);
 			rabbitAdmin.setApplicationContext(ctx);
 			rabbitAdmin.afterPropertiesSet();
 			Log logger = spy(TestUtils.getPropertyValue(rabbitAdmin, "logger", Log.class));
@@ -344,7 +336,7 @@ public class RabbitAdminTests {
 		verify(connection, times(1)).createChannel(false);
 		verify(channel1, times(4)).queueDeclare();
 		verify(channel1, times(1)).close();
-		verifyZeroInteractions(channel2);
+		verifyNoInteractions(channel2);
 	}
 
 	@Test
@@ -375,33 +367,84 @@ public class RabbitAdminTests {
 	}
 
 	@Test
-	public void testMasterLocator() throws Exception {
+	public void testLeaderLocator() throws Exception {
 		CachingConnectionFactory cf = new CachingConnectionFactory(
 				RabbitAvailableCondition.getBrokerRunning().getConnectionFactory());
 		RabbitAdmin admin = new RabbitAdmin(cf);
 		AnonymousQueue queue = new AnonymousQueue();
 		admin.declareQueue(queue);
 		Client client = new Client("http://guest:guest@localhost:15672/api");
-		QueueInfo info = client.getQueue("?", queue.getName());
-		int n = 0;
-		while (n++ < 100 && info == null) {
-			Thread.sleep(100);
-			info = client.getQueue("/", queue.getName());
-		}
-		assertThat(info).isNotNull();
-		assertThat(info.getArguments().get(Queue.X_QUEUE_MASTER_LOCATOR)).isEqualTo("client-local");
+		AnonymousQueue queue1 = queue;
+		QueueInfo info = await().until(() -> client.getQueue("/", queue1.getName()), inf -> inf != null);
+		assertThat(info.getArguments().get(Queue.X_QUEUE_LEADER_LOCATOR)).isEqualTo("client-local");
 
 		queue = new AnonymousQueue();
-		queue.setMasterLocator(null);
+		queue.setLeaderLocator(null);
 		admin.declareQueue(queue);
-		info = client.getQueue("?", queue.getName());
-		n = 0;
-		while (n++ < 100 && info == null) {
-			Thread.sleep(100);
-			info = client.getQueue("/", queue.getName());
-		}
-		assertThat(info).isNotNull();
-		assertThat(info.getArguments().get(Queue.X_QUEUE_MASTER_LOCATOR)).isNull();
+		AnonymousQueue queue2 = queue;
+		info = await().until(() -> client.getQueue("/", queue2.getName()), inf -> inf != null);
+		assertThat(info.getArguments().get(Queue.X_QUEUE_LEADER_LOCATOR)).isNull();
+		cf.destroy();
+	}
+
+	@Test
+	void manualDeclarations() {
+		CachingConnectionFactory cf = new CachingConnectionFactory(
+				RabbitAvailableCondition.getBrokerRunning().getConnectionFactory());
+		RabbitAdmin admin = new RabbitAdmin(cf);
+		GenericApplicationContext applicationContext = new GenericApplicationContext();
+		admin.setApplicationContext(applicationContext);
+		admin.setRedeclareManualDeclarations(true);
+		applicationContext.registerBean("admin", RabbitAdmin.class, () -> admin);
+		applicationContext.registerBean("beanQueue", Queue.class,
+				() -> new Queue("thisOneShouldntBeInTheManualDecs", false, true, true));
+		applicationContext.registerBean("beanEx", DirectExchange.class,
+				() -> new DirectExchange("thisOneShouldntBeInTheManualDecs", false, true));
+		applicationContext.registerBean("beanBinding", Binding.class,
+				() -> new Binding("thisOneShouldntBeInTheManualDecs", DestinationType.QUEUE,
+						"thisOneShouldntBeInTheManualDecs", "test", null));
+		applicationContext.refresh();
+		Map<?, ?> declarables = TestUtils.getPropertyValue(admin, "manualDeclarables", Map.class);
+		assertThat(declarables).hasSize(0);
+		// check the auto-configured Declarables
+		RabbitTemplate template = new RabbitTemplate(cf);
+		template.convertAndSend("thisOneShouldntBeInTheManualDecs", "test", "foo");
+		Object received = template.receiveAndConvert("thisOneShouldntBeInTheManualDecs", 5000);
+		assertThat(received).isEqualTo("foo");
+		// manual declarations
+		admin.declareQueue(new Queue("test1", false, true, true));
+		admin.declareQueue(new Queue("test2", false, true, true));
+		admin.declareExchange(new DirectExchange("ex1", false, true));
+		admin.declareBinding(new Binding("test1", DestinationType.QUEUE, "ex1", "test", null));
+		admin.deleteQueue("test2");
+		template.execute(chan -> chan.queueDelete("test1"));
+		cf.resetConnection();
+		admin.initialize();
+		assertThat(admin.getQueueProperties("test1")).isNotNull();
+		assertThat(admin.getQueueProperties("test2")).isNull();
+		assertThat(declarables).hasSize(3);
+		// verify the exchange and binding were recovered too
+		template.convertAndSend("ex1", "test", "foo");
+		received = template.receiveAndConvert("test1", 5000);
+		assertThat(received).isEqualTo("foo");
+		admin.resetAllManualDeclarations();
+		assertThat(declarables).hasSize(0);
+		cf.resetConnection();
+		admin.initialize();
+		assertThat(admin.getQueueProperties("test1")).isNull();
+		admin.declareQueue(new Queue("test1", false, true, true));
+		admin.declareExchange(new DirectExchange("ex1", false, true));
+		admin.declareBinding(new Binding("test1", DestinationType.QUEUE, "ex1", "test", null));
+		admin.declareExchange(new DirectExchange("ex2", false, true));
+		admin.declareBinding(new Binding("test1", DestinationType.QUEUE, "ex2", "test", null));
+		admin.declareBinding(new Binding("ex1", DestinationType.EXCHANGE, "ex2", "ex1", null));
+		assertThat(declarables).hasSize(6);
+		admin.deleteExchange("ex2");
+		assertThat(declarables).hasSize(3);
+		admin.deleteQueue("test1");
+		assertThat(declarables).hasSize(1);
+		admin.deleteExchange("ex1");
+		assertThat(declarables).hasSize(0);
 		cf.destroy();
 	}
 

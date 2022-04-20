@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2020 the original author or authors.
+ * Copyright 2002-2022 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,6 +42,7 @@ import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.amqp.ImmediateAcknowledgeAmqpException;
 import org.springframework.amqp.core.AcknowledgeMode;
 import org.springframework.amqp.core.AmqpAdmin;
+import org.springframework.amqp.core.BatchMessageListener;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageListener;
 import org.springframework.amqp.core.MessagePostProcessor;
@@ -55,6 +56,7 @@ import org.springframework.amqp.rabbit.connection.RabbitAccessor;
 import org.springframework.amqp.rabbit.connection.RabbitResourceHolder;
 import org.springframework.amqp.rabbit.connection.RabbitUtils;
 import org.springframework.amqp.rabbit.connection.RoutingConnectionFactory;
+import org.springframework.amqp.rabbit.listener.api.ChannelAwareBatchMessageListener;
 import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.listener.exception.FatalListenerExecutionException;
 import org.springframework.amqp.rabbit.listener.exception.FatalListenerStartupException;
@@ -69,6 +71,7 @@ import org.springframework.amqp.support.postprocessor.MessagePostProcessorUtils;
 import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.aop.support.DefaultPointcutAdvisor;
 import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.BeanFactoryUtils;
 import org.springframework.beans.factory.BeanNameAware;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.context.ApplicationContext;
@@ -106,10 +109,13 @@ import io.micrometer.core.instrument.Timer.Sample;
  * @author Arnaud Cogoluègnes
  * @author Artem Bilan
  * @author Mohammad Hewedy
+ * @author Mat Jaggard
  */
 public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		implements MessageListenerContainer, ApplicationContextAware, BeanNameAware, DisposableBean,
 		ApplicationEventPublisherAware {
+
+	private static final int EXIT_99 = 99;
 
 	private static final String UNCHECKED = "unchecked";
 
@@ -128,6 +134,8 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 
 	private static final boolean MICROMETER_PRESENT = ClassUtils.isPresent(
 			"io.micrometer.core.instrument.MeterRegistry", AbstractMessageListenerContainer.class.getClassLoader());
+
+	private final Object lifecycleMonitor = new Object();
 
 	private final ContainerDelegate delegate = this::actualInvokeListener;
 
@@ -149,7 +157,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	private TransactionAttribute transactionAttribute = new DefaultTransactionAttribute();
 
 	@Nullable
-	private String beanName;
+	private String beanName = "not.a.Spring.bean";
 
 	private Executor taskExecutor = new SimpleAsyncTaskExecutor();
 
@@ -179,29 +187,25 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 
 	private int phase = Integer.MAX_VALUE;
 
-	private volatile boolean active = false;
+	private boolean active = false;
 
-	private volatile boolean running = false;
-
-	private final Object lifecycleMonitor = new Object();
-
-	private volatile List<Queue> queues = new CopyOnWriteArrayList<>();
+	private boolean running = false;
 
 	private ErrorHandler errorHandler = new ConditionalRejectingErrorHandler();
 
 	private boolean exposeListenerChannel = true;
 
-	private volatile MessageListener messageListener;
+	private MessageListener messageListener;
 
-	private volatile AcknowledgeMode acknowledgeMode = AcknowledgeMode.AUTO;
+	private AcknowledgeMode acknowledgeMode = AcknowledgeMode.AUTO;
 
-	private volatile boolean deBatchingEnabled = DEFAULT_DEBATCHING_ENABLED;
+	private boolean deBatchingEnabled = DEFAULT_DEBATCHING_ENABLED;
 
-	private volatile boolean initialized;
+	private boolean initialized;
 
 	private Collection<MessagePostProcessor> afterReceivePostProcessors;
 
-	private volatile ApplicationContext applicationContext;
+	private ApplicationContext applicationContext;
 
 	private String listenerId;
 
@@ -210,17 +214,19 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	@Nullable
 	private ConsumerTagStrategy consumerTagStrategy;
 
-	private volatile boolean exclusive;
+	private boolean exclusive;
 
-	private volatile boolean noLocal;
+	private boolean noLocal;
 
-	private volatile boolean defaultRequeueRejected = true;
+	private boolean defaultRequeueRejected = true;
 
-	private volatile int prefetchCount = DEFAULT_PREFETCH_COUNT;
+	private int prefetchCount = DEFAULT_PREFETCH_COUNT;
+
+	private boolean globalQos;
 
 	private long idleEventInterval;
 
-	private volatile long lastReceive = System.currentTimeMillis();
+	private long lastReceive = System.currentTimeMillis();
 
 	private boolean statefulRetryFatalWithNullMessageId = true;
 
@@ -240,7 +246,17 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 
 	private boolean micrometerEnabled = true;
 
+	private boolean isBatchListener;
+
+	private long consumeDelay;
+
+	private JavaLangErrorHandler javaLangErrorHandler = error -> System.exit(EXIT_99);
+
+	private volatile List<Queue> queues = new CopyOnWriteArrayList<>();
+
 	private volatile boolean lazyLoad;
+
+	private boolean asyncReplies;
 
 	@Override
 	public void setApplicationEventPublisher(ApplicationEventPublisher applicationEventPublisher) {
@@ -284,6 +300,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * Set the name of the queue(s) to receive messages from.
 	 * @param queueName the desired queueName(s) (can not be <code>null</code>)
 	 */
+	@Override
 	public void setQueueNames(String... queueName) {
 		Assert.noNullElements(queueName, "Queue name(s) cannot be null");
 		setQueues(Arrays.stream(queueName)
@@ -423,6 +440,9 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 */
 	public void setMessageListener(MessageListener messageListener) {
 		this.messageListener = messageListener;
+		this.isBatchListener = messageListener instanceof BatchMessageListener
+				|| messageListener instanceof ChannelAwareBatchMessageListener;
+		this.asyncReplies = messageListener.isAsyncReplies();
 	}
 
 	/**
@@ -440,9 +460,8 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		}
 	}
 
-	/**
-	 * @return The message listener object to register.
-	 */
+	@Override
+	@Nullable
 	public Object getMessageListener() {
 		return this.messageListener;
 	}
@@ -543,6 +562,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 *
 	 * @param autoStartup true for auto startup.
 	 */
+	@Override
 	public void setAutoStartup(boolean autoStartup) {
 		this.autoStartup = autoStartup;
 	}
@@ -679,6 +699,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		return this.listenerId != null ? this.listenerId : this.beanName;
 	}
 
+	@Override
 	public void setListenerId(String listenerId) {
 		this.listenerId = listenerId;
 	}
@@ -720,8 +741,10 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * @return the arguments.
 	 * @since 2.0
 	 */
-	protected Map<String, Object> getConsumerArguments() {
-		return this.consumerArgs;
+	public Map<String, Object> getConsumerArguments() {
+		synchronized (this.consumersMonitor) {
+			return new HashMap<>(this.consumerArgs);
+		}
 	}
 
 	/**
@@ -783,6 +806,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * Tell the broker how many messages to send to each consumer in a single request.
 	 * Often this can be set quite high to improve throughput.
 	 * @param prefetchCount the prefetch count
+	 * @see com.rabbitmq.client.Channel#basicQos(int, boolean)
 	 */
 	public void setPrefetchCount(int prefetchCount) {
 		this.prefetchCount = prefetchCount;
@@ -795,6 +819,20 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 */
 	protected int getPrefetchCount() {
 		return this.prefetchCount;
+	}
+
+	/**
+	 * Apply prefetchCount to the entire channel.
+	 * @param globalQos true for a channel-wide prefetch.
+	 * @since 2.2.17
+	 * @see com.rabbitmq.client.Channel#basicQos(int, boolean)
+	 */
+	public void setGlobalQos(boolean globalQos) {
+		this.globalQos = globalQos;
+	}
+
+	protected boolean isGlobalQos() {
+		return this.globalQos;
 	}
 
 	/**
@@ -970,17 +1008,23 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 
 
 	public void setPossibleAuthenticationFailureFatal(boolean possibleAuthenticationFailureFatal) {
-		this.possibleAuthenticationFailureFatal = possibleAuthenticationFailureFatal;
+		doSetPossibleAuthenticationFailureFatal(possibleAuthenticationFailureFatal);
 		this.possibleAuthenticationFailureFatalSet = true;
+	}
+
+	protected final void doSetPossibleAuthenticationFailureFatal(boolean possibleAuthenticationFailureFatal) {
+		this.possibleAuthenticationFailureFatal = possibleAuthenticationFailureFatal;
 	}
 
 	public boolean isPossibleAuthenticationFailureFatal() {
 		return this.possibleAuthenticationFailureFatal;
 	}
 
-
 	protected boolean isPossibleAuthenticationFailureFatalSet() {
 		return this.possibleAuthenticationFailureFatalSet;
+	}
+	protected boolean isAsyncReplies() {
+		return this.asyncReplies;
 	}
 
 	/**
@@ -1116,10 +1160,45 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	}
 
 	/**
+	 * Get the consumeDelay - a time to wait before consuming in ms.
+	 * @return the consume delay.
+	 * @since 2.3
+	 */
+	protected long getConsumeDelay() {
+		return this.consumeDelay;
+	}
+
+	/**
+	 * Set the consumeDelay - a time to wait before consuming in ms. This is useful when
+	 * using the sharding plugin with {@code concurrency > 1}, to avoid uneven distribution of
+	 * consumers across the shards. See the plugin README for more information.
+	 * @param consumeDelay the consume delay.
+	 * @since 2.3
+	 */
+	public void setConsumeDelay(long consumeDelay) {
+		this.consumeDelay = consumeDelay;
+	}
+
+	protected JavaLangErrorHandler getJavaLangErrorHandler() {
+		return this.javaLangErrorHandler;
+	}
+
+	/**
+	 * Provide a JavaLangErrorHandler implementation; by default, {@code System.exit(99)}
+	 * is called.
+	 * @param javaLangErrorHandler the handler.
+	 * @since 2.2.12
+	 */
+	public void setjavaLangErrorHandler(JavaLangErrorHandler javaLangErrorHandler) {
+		Assert.notNull(javaLangErrorHandler, "'javaLangErrorHandler' cannot be null");
+		this.javaLangErrorHandler = javaLangErrorHandler;
+	}
+
+	/**
 	 * Delegates to {@link #validateConfiguration()} and {@link #initialize()}.
 	 */
 	@Override
-	public final void afterPropertiesSet() {
+	public void afterPropertiesSet() {
 		super.afterPropertiesSet();
 		Assert.state(
 				this.exposeListenerChannel || !getAcknowledgeMode().isManual(),
@@ -1136,12 +1215,19 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		try {
 			if (this.micrometerHolder == null && MICROMETER_PRESENT && this.micrometerEnabled
 					&& this.applicationContext != null) {
-				this.micrometerHolder = new MicrometerHolder(this.applicationContext, getListenerId(),
+				String id = getListenerId();
+				if (id == null) {
+					id = "no_id_or_beanName";
+				}
+				this.micrometerHolder = new MicrometerHolder(this.applicationContext, id,
 						this.micrometerTags);
 			}
 		}
 		catch (IllegalStateException e) {
 			this.logger.debug("Could not enable micrometer timers", e);
+		}
+		if (this.isAsyncReplies() && !AcknowledgeMode.MANUAL.equals(this.acknowledgeMode)) {
+			this.acknowledgeMode = AcknowledgeMode.MANUAL;
 		}
 	}
 
@@ -1228,7 +1314,8 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	public void shutdown() {
 		synchronized (this.lifecycleMonitor) {
 			if (!isActive()) {
-				logger.info("Shutdown ignored - container is not active already");
+				logger.debug("Shutdown ignored - container is not active already");
+				this.lifecycleMonitor.notifyAll();
 				return;
 			}
 			this.active = false;
@@ -1245,10 +1332,14 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 			throw convertRabbitAccessException(ex);
 		}
 		finally {
-			synchronized (this.lifecycleMonitor) {
-				this.running = false;
-				this.lifecycleMonitor.notifyAll();
-			}
+			setNotRunning();
+		}
+	}
+
+	protected void setNotRunning() {
+		synchronized (this.lifecycleMonitor) {
+			this.running = false;
+			this.lifecycleMonitor.notifyAll();
 		}
 	}
 
@@ -1334,20 +1425,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 			throw convertRabbitAccessException(ex);
 		}
 		finally {
-			synchronized (this.lifecycleMonitor) {
-				this.running = false;
-				this.lifecycleMonitor.notifyAll();
-			}
-		}
-	}
-
-	@Override
-	public void stop(Runnable callback) {
-		try {
-			stop();
-		}
-		finally {
-			callback.run();
+			setNotRunning();
 		}
 	}
 
@@ -1584,7 +1662,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 			}
 		}
 		finally {
-			cleanUpAfterInvoke(resourceHolder, channelToUse, boundHere);
+			cleanUpAfterInvoke(resourceHolder, channelToUse, boundHere); // NOSONAR channel not null here
 		}
 	}
 
@@ -1704,6 +1782,13 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		}
 	}
 
+	protected void publishMissingQueueEvent(String queue) {
+		if (this.applicationEventPublisher != null) {
+			this.applicationEventPublisher
+					.publishEvent(new MissingQueueEvent(this, queue));
+		}
+	}
+
 	protected final void publishIdleContainerEvent(long idleTime) {
 		if (this.applicationEventPublisher != null) {
 			this.applicationEventPublisher.publishEvent(
@@ -1718,8 +1803,10 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	}
 
 	protected void configureAdminIfNeeded() {
-		if (this.amqpAdmin == null && this.getApplicationContext() != null) {
-			Map<String, AmqpAdmin> admins = this.getApplicationContext().getBeansOfType(AmqpAdmin.class);
+		if (this.amqpAdmin == null && this.applicationContext != null) {
+			Map<String, AmqpAdmin> admins =
+					BeanFactoryUtils.beansOfTypeIncludingAncestors(this.applicationContext, AmqpAdmin.class,
+							false, false);
 			if (admins.size() == 1) {
 				this.amqpAdmin = admins.values().iterator().next();
 			}
@@ -1920,10 +2007,37 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		}
 	}
 
+	@Nullable
+	protected List<Message> debatch(Message message) {
+		if (this.isBatchListener && isDeBatchingEnabled()
+				&& getBatchingStrategy().canDebatch(message.getMessageProperties())) {
+			final List<Message> messageList = new ArrayList<>();
+			getBatchingStrategy().deBatch(message, fragment -> messageList.add(fragment));
+			return messageList;
+		}
+		return null;
+	}
+
 	@FunctionalInterface
 	private interface ContainerDelegate {
 
 		void invokeListener(Channel channel, Object data);
+
+	}
+
+	/**
+	 * A handler for {@link Error} on the container thread(s).
+	 * @since 2.2.12
+	 *
+	 */
+	@FunctionalInterface
+	public interface JavaLangErrorHandler {
+
+		/**
+		 * Handle the error; typically, the JVM will be terminated.
+		 * @param error the error.
+		 */
+		void handle(Error error);
 
 	}
 

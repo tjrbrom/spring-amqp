@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2020 the original author or authors.
+ * Copyright 2014-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@ package org.springframework.amqp.rabbit.listener;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.Map;
 
 import org.springframework.amqp.core.AcknowledgeMode;
@@ -92,6 +91,10 @@ public abstract class AbstractRabbitListenerEndpoint implements RabbitListenerEn
 	private AcknowledgeMode ackMode;
 
 	private ReplyPostProcessor replyPostProcessor;
+
+	private String replyContentType;
+
+	private boolean converterWinsContentType = true;
 
 	@Override
 	public void setBeanFactory(BeanFactory beanFactory) throws BeansException {
@@ -340,32 +343,67 @@ public abstract class AbstractRabbitListenerEndpoint implements RabbitListenerEn
 	}
 
 	@Override
-	public void setupListenerContainer(MessageListenerContainer listenerContainer) {
-		AbstractMessageListenerContainer container = (AbstractMessageListenerContainer) listenerContainer;
+	public String getReplyContentType() {
+		return this.replyContentType;
+	}
 
-		boolean queuesEmpty = getQueues().isEmpty();
-		boolean queueNamesEmpty = getQueueNames().isEmpty();
-		if (!queuesEmpty && !queueNamesEmpty) {
-			throw new IllegalStateException("Queues or queue names must be provided but not both for " + this);
-		}
-		if (queuesEmpty) {
-			Collection<String> names = getQueueNames();
-			container.setQueueNames(names.toArray(new String[names.size()]));
+	/**
+	 * Set the reply content type.
+	 * @param replyContentType the content type.
+	 * @since 2.3
+	 */
+	public void setReplyContentType(String replyContentType) {
+		this.replyContentType = replyContentType;
+	}
+
+	@Override
+	public boolean isConverterWinsContentType() {
+		return this.converterWinsContentType;
+	}
+
+	/**
+	 * Set whether the content type set by a converter prevails or not.
+	 * @param converterWinsContentType false to always apply the reply content type.
+	 * @since 2.3
+	 */
+	public void setConverterWinsContentType(boolean converterWinsContentType) {
+		this.converterWinsContentType = converterWinsContentType;
+	}
+
+	@Override
+	public void setupListenerContainer(MessageListenerContainer listenerContainer) {
+		Collection<String> qNames = getQueueNames();
+		boolean queueNamesEmpty = qNames.isEmpty();
+		if (listenerContainer instanceof AbstractMessageListenerContainer) {
+			AbstractMessageListenerContainer container = (AbstractMessageListenerContainer) listenerContainer;
+
+			boolean queuesEmpty = getQueues().isEmpty();
+			if (!queuesEmpty && !queueNamesEmpty) {
+				throw new IllegalStateException("Queues or queue names must be provided but not both for " + this);
+			}
+			if (queuesEmpty) {
+				Collection<String> names = qNames;
+				container.setQueueNames(names.toArray(new String[0]));
+			}
+			else {
+				Collection<Queue> instances = getQueues();
+				container.setQueues(instances.toArray(new Queue[0]));
+			}
+
+			container.setExclusive(isExclusive());
+			if (getPriority() != null) {
+				Map<String, Object> args = container.getConsumerArguments();
+				args.put("x-priority", getPriority());
+				container.setConsumerArguments(args);
+			}
+
+			if (getAdmin() != null) {
+				container.setAmqpAdmin(getAdmin());
+			}
 		}
 		else {
-			Collection<Queue> instances = getQueues();
-			container.setQueues(instances.toArray(new Queue[instances.size()]));
-		}
-
-		container.setExclusive(isExclusive());
-		if (getPriority() != null) {
-			Map<String, Object> args = new HashMap<String, Object>();
-			args.put("x-priority", getPriority());
-			container.setConsumerArguments(args);
-		}
-
-		if (getAdmin() != null) {
-			container.setAmqpAdmin(getAdmin());
+			Assert.state(!queueNamesEmpty, "At least one queue name is required");
+			listenerContainer.setQueueNames(qNames.toArray(new String[0]));
 		}
 		setupMessageListener(listenerContainer);
 	}

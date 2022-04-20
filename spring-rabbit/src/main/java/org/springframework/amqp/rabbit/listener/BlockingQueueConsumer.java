@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -158,6 +158,12 @@ public class BlockingQueueConsumer {
 
 	private ApplicationEventPublisher applicationEventPublisher;
 
+	private long consumeDelay;
+
+	private java.util.function.Consumer<String> missingQueuePublisher = str -> { };
+
+	private boolean globalQos;
+
 	private volatile long abortStarted;
 
 	private volatile boolean normalCancel;
@@ -289,7 +295,7 @@ public class BlockingQueueConsumer {
 		this.noLocal = noLocal;
 		this.exclusive = exclusive;
 		this.queues = Arrays.copyOf(queues, queues.length);
-		this.queue = new LinkedBlockingQueue<Delivery>(prefetchCount);
+		this.queue = new LinkedBlockingQueue<Delivery>(queues.length == 0 ? prefetchCount : prefetchCount * queues.length);
 	}
 
 	public Channel getChannel() {
@@ -373,12 +379,42 @@ public class BlockingQueueConsumer {
 	}
 
 	/**
+	 * Set the publisher for a missing queue event.
+	 * @param missingQueuePublisher the publisher.
+	 * @since 2.1.18
+	 */
+	public void setMissingQueuePublisher(java.util.function.Consumer<String> missingQueuePublisher) {
+		this.missingQueuePublisher = missingQueuePublisher;
+	}
+
+	/**
+	 * Set the consumeDelay - a time to wait before consuming in ms. This is useful when
+	 * using the sharding plugin with {@code concurrency > 1}, to avoid uneven distribution of
+	 * consumers across the shards. See the plugin README for more information.
+	 * @param consumeDelay the consume delay.
+	 * @since 2.3
+	 */
+	public void setConsumeDelay(long consumeDelay) {
+		this.consumeDelay = consumeDelay;
+	}
+
+	/**
 	 * Clear the delivery tags when rolling back with an external transaction
 	 * manager.
 	 * @since 1.6.6
 	 */
 	public void clearDeliveryTags() {
 		this.deliveryTags.clear();
+	}
+
+	/**
+	 * Apply prefetch to the entire channel.
+	 * @param globalQos true for a channel-wide prefetch.
+	 * @since 2.2.17
+	 * @see Channel#basicQos(int, boolean)
+	 */
+	public void setGlobalQos(boolean globalQos) {
+		this.globalQos = globalQos;
 	}
 
 	/**
@@ -569,7 +605,7 @@ public class BlockingQueueConsumer {
 		this.activeObjectCounter.add(this);
 
 		passiveDeclarations();
-		setQosAndreateConsumers();
+		setQosAndCreateConsumers();
 	}
 
 	private void passiveDeclarations() {
@@ -595,12 +631,18 @@ public class BlockingQueueConsumer {
 		this.declaring = false;
 	}
 
-	private void setQosAndreateConsumers() {
-		if (!this.acknowledgeMode.isAutoAck() && !cancelled()) {
-			// Set basicQos before calling basicConsume (otherwise if we are not acking the broker
-			// will send blocks of 100 messages)
+	private void setQosAndCreateConsumers() {
+		if (this.consumeDelay > 0) {
 			try {
-				this.channel.basicQos(this.prefetchCount);
+				Thread.sleep(this.consumeDelay);
+			}
+			catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		}
+		if (!this.acknowledgeMode.isAutoAck() && !cancelled()) {
+			try {
+				this.channel.basicQos(this.prefetchCount, this.globalQos);
 			}
 			catch (IOException e) {
 				this.activeObjectCounter.release(this);
@@ -693,6 +735,7 @@ public class BlockingQueueConsumer {
 				if (logger.isWarnEnabled()) {
 					logger.warn("Failed to declare queue: " + queueName);
 				}
+				this.missingQueuePublisher.accept(queueName);
 				if (!this.channel.isOpen()) {
 					throw new AmqpIOException(e);
 				}
@@ -736,6 +779,17 @@ public class BlockingQueueConsumer {
 	 * @param ex the thrown application exception or error
 	 */
 	public void rollbackOnExceptionIfNecessary(Throwable ex) {
+		rollbackOnExceptionIfNecessary(ex, -1);
+	}
+
+	/**
+	 * Perform a rollback, handling rollback exceptions properly.
+	 * @param ex the thrown application exception or error
+	 * @param tag delivery tag; when specified (greater than or equal to 0) only that
+	 * message is nacked.
+	 * @since 2.2.21.
+	 */
+	public void rollbackOnExceptionIfNecessary(Throwable ex, long tag) {
 
 		boolean ackRequired = !this.acknowledgeMode.isAutoAck()
 				&& (!this.acknowledgeMode.isManual() || ContainerUtils.isRejectManual(ex));
@@ -747,14 +801,20 @@ public class BlockingQueueConsumer {
 				RabbitUtils.rollbackIfNecessary(this.channel);
 			}
 			if (ackRequired) {
-				OptionalLong deliveryTag = this.deliveryTags.stream().mapToLong(l -> l).max();
-				if (deliveryTag.isPresent()) {
-					this.channel.basicNack(deliveryTag.getAsLong(), true,
-							ContainerUtils.shouldRequeue(this.defaultRequeueRejected, ex, logger));
+				if (tag < 0) {
+					OptionalLong deliveryTag = this.deliveryTags.stream().mapToLong(l -> l).max();
+					if (deliveryTag.isPresent()) {
+						this.channel.basicNack(deliveryTag.getAsLong(), true,
+								ContainerUtils.shouldRequeue(this.defaultRequeueRejected, ex, logger));
+					}
+					if (this.transactional) {
+						// Need to commit the reject (=nack)
+						RabbitUtils.commitIfNecessary(this.channel);
+					}
 				}
-				if (this.transactional) {
-					// Need to commit the reject (=nack)
-					RabbitUtils.commitIfNecessary(this.channel);
+				else {
+					this.channel.basicNack(tag, false,
+							ContainerUtils.shouldRequeue(this.defaultRequeueRejected, ex, logger));
 				}
 			}
 		}
@@ -763,7 +823,12 @@ public class BlockingQueueConsumer {
 			throw RabbitExceptionTranslator.convertRabbitAccessException(e); // NOSONAR stack trace loss
 		}
 		finally {
-			this.deliveryTags.clear();
+			if (tag < 0) {
+				this.deliveryTags.clear();
+			}
+			else {
+				this.deliveryTags.remove(tag);
+			}
 		}
 	}
 

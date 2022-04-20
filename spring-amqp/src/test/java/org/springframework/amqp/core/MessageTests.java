@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2020 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.Date;
+import java.util.stream.IntStream;
 
 import org.junit.jupiter.api.Test;
 
@@ -56,13 +57,13 @@ public class MessageTests {
 
 	@Test
 	public void toStringForNullMessageProperties() {
-		Message message = new Message(new byte[0], null);
+		Message message = new Message(new byte[0]);
 		assertThat(message.toString()).isNotNull();
 	}
 
 	@Test
 	public void toStringForNonStringMessageBody() {
-		Message message = new Message(SerializationUtils.serialize(new Date()), null);
+		Message message = new Message(SerializationUtils.serialize(new Date()));
 		assertThat(message.toString()).isNotNull();
 	}
 
@@ -106,9 +107,26 @@ public class MessageTests {
 		Message listMessage = new SimpleMessageConverter().toMessage(Collections.singletonList(new Foo()),
 				new MessageProperties());
 		assertThat(listMessage.toString()).doesNotContainPattern("aFoo");
-		Message.addWhiteListPatterns(Foo.class.getName());
-		assertThat(message.toString()).contains("aFoo");
-		assertThat(listMessage.toString()).contains("aFoo");
+		assertThat(message.toString()).contains("[serialized object]");
+		assertThat(listMessage.toString()).contains("[serialized object]");
+	}
+
+	@Test
+	void dontToStringLongBody() {
+		MessageProperties messageProperties = new MessageProperties();
+		messageProperties.setContentType(MessageProperties.CONTENT_TYPE_TEXT_PLAIN);
+		StringBuilder builder1 = new StringBuilder();
+		IntStream.range(0, 50).forEach(i -> builder1.append("x"));
+		String bodyAsString = builder1.toString();
+		Message message = new Message(bodyAsString.getBytes(), messageProperties);
+		assertThat(message.toString()).contains(bodyAsString);
+		StringBuilder builder2 = new StringBuilder();
+		IntStream.range(0, 51).forEach(i -> builder2.append("x"));
+		bodyAsString = builder2.toString();
+		message = new Message(bodyAsString.getBytes(), messageProperties);
+		assertThat(message.toString()).contains("[51]");
+		Message.setMaxBodyLength(100);
+		assertThat(message.toString()).contains(bodyAsString);
 	}
 
 	@SuppressWarnings("serial")

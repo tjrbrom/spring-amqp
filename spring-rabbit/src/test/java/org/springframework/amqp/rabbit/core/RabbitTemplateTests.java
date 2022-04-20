@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2022 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package org.springframework.amqp.rabbit.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.fail;
@@ -33,6 +34,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
+import java.io.IOException;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -41,6 +43,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -58,13 +61,18 @@ import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.core.ReceiveAndReplyCallback;
+import org.springframework.amqp.core.ReturnedMessage;
 import org.springframework.amqp.rabbit.connection.AbstractRoutingConnectionFactory;
+import org.springframework.amqp.rabbit.connection.AfterCompletionFailedException;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ChannelProxy;
+import org.springframework.amqp.rabbit.connection.ConnectionFactoryUtils;
 import org.springframework.amqp.rabbit.connection.PublisherCallbackChannel;
 import org.springframework.amqp.rabbit.connection.RabbitUtils;
 import org.springframework.amqp.rabbit.connection.SimpleRoutingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.SingleConnectionFactory;
+import org.springframework.amqp.rabbit.core.RabbitTemplate.ReturnsCallback;
+import org.springframework.amqp.rabbit.transaction.RabbitTransactionManager;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
 import org.springframework.amqp.utils.SerializationUtils;
 import org.springframework.amqp.utils.test.TestUtils;
@@ -77,9 +85,11 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionException;
 import org.springframework.transaction.support.AbstractPlatformTransactionManager;
 import org.springframework.transaction.support.DefaultTransactionStatus;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import com.rabbitmq.client.AMQP;
+import com.rabbitmq.client.AMQP.Tx.SelectOk;
 import com.rabbitmq.client.AuthenticationFailureException;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
@@ -361,24 +371,33 @@ public class RabbitTemplateTests {
 	@SuppressWarnings("unchecked")
 	public void testRoutingConnectionFactory() throws Exception {
 		org.springframework.amqp.rabbit.connection.ConnectionFactory connectionFactory1 =
-				Mockito.mock(org.springframework.amqp.rabbit.connection.ConnectionFactory.class);
+				mock(org.springframework.amqp.rabbit.connection.ConnectionFactory.class);
 		org.springframework.amqp.rabbit.connection.ConnectionFactory connectionFactory2 =
-				Mockito.mock(org.springframework.amqp.rabbit.connection.ConnectionFactory.class);
+				mock(org.springframework.amqp.rabbit.connection.ConnectionFactory.class);
+		org.springframework.amqp.rabbit.connection.ConnectionFactory connectionFactory3 =
+				mock(org.springframework.amqp.rabbit.connection.ConnectionFactory.class);
+		org.springframework.amqp.rabbit.connection.ConnectionFactory connectionFactory4 =
+				mock(org.springframework.amqp.rabbit.connection.ConnectionFactory.class);
 		Map<Object, org.springframework.amqp.rabbit.connection.ConnectionFactory> factories =
 				new HashMap<Object, org.springframework.amqp.rabbit.connection.ConnectionFactory>(2);
 		factories.put("foo", connectionFactory1);
 		factories.put("bar", connectionFactory2);
+		factories.put("baz", connectionFactory3);
+		factories.put("qux", connectionFactory4);
 
 
 		AbstractRoutingConnectionFactory connectionFactory = new SimpleRoutingConnectionFactory();
 		connectionFactory.setTargetConnectionFactories(factories);
 
 		final RabbitTemplate template = new RabbitTemplate(connectionFactory);
-		Expression expression = new SpelExpressionParser()
+		Expression sendExpression = new SpelExpressionParser()
 				.parseExpression("T(org.springframework.amqp.rabbit.core.RabbitTemplateTests)" +
 						".LOOKUP_KEY_COUNT.getAndIncrement() % 2 == 0 ? 'foo' : 'bar'");
-		template.setSendConnectionFactorySelectorExpression(expression);
-		template.setReceiveConnectionFactorySelectorExpression(expression);
+		template.setSendConnectionFactorySelectorExpression(sendExpression);
+		Expression receiveExpression = new SpelExpressionParser()
+				.parseExpression("T(org.springframework.amqp.rabbit.core.RabbitTemplateTests)" +
+						".LOOKUP_KEY_COUNT.getAndIncrement() % 2 == 0 ? 'baz' : 'qux'");
+		template.setReceiveConnectionFactorySelectorExpression(receiveExpression);
 
 		for (int i = 0; i < 3; i++) {
 			try {
@@ -401,8 +420,10 @@ public class RabbitTemplateTests {
 			}
 		}
 
-		Mockito.verify(connectionFactory1, Mockito.times(5)).createConnection();
-		Mockito.verify(connectionFactory2, Mockito.times(4)).createConnection();
+		Mockito.verify(connectionFactory1, times(2)).createConnection();
+		Mockito.verify(connectionFactory2, times(1)).createConnection();
+		Mockito.verify(connectionFactory3, times(3)).createConnection();
+		Mockito.verify(connectionFactory4, times(3)).createConnection();
 	}
 
 	@Test
@@ -557,6 +578,84 @@ public class RabbitTemplateTests {
 		template.invoke(t -> null);
 		verify(pcf).createConnection();
 		verify(conn).createChannel(true);
+	}
+
+	@SuppressWarnings("deprecation")
+	@Test
+	public void testReturnsFallback() {
+		RabbitTemplate template = new RabbitTemplate();
+		AtomicBoolean called = new AtomicBoolean();
+		template.setReturnCallback((message, replyCode, replyText, exchange, routingKey) -> {
+			called.set(true);
+		});
+		ReturnsCallback cb = TestUtils.getPropertyValue(template, "returnsCallback", ReturnsCallback.class);
+		cb.returnedMessage(new ReturnedMessage(null, 0, null, null, null));
+		assertThat(called.get()).isTrue();
+		assertThatIllegalStateException().isThrownBy(() ->
+				template.setReturnCallback(mock(RabbitTemplate.ReturnCallback.class)));
+		RabbitTemplate template2 = new RabbitTemplate();
+		org.springframework.amqp.rabbit.core.RabbitTemplate.ReturnCallback callback =
+				mock(org.springframework.amqp.rabbit.core.RabbitTemplate.ReturnCallback.class);
+		template2.setReturnCallback(callback);
+		template2.setReturnCallback(callback);
+	}
+
+	@Test
+	void resourcesClearedAfterTxFails() throws IOException, TimeoutException {
+		ConnectionFactory mockConnectionFactory = mock(ConnectionFactory.class);
+		Connection mockConnection = mock(Connection.class);
+		Channel mockChannel = mock(Channel.class);
+
+		given(mockConnectionFactory.newConnection(any(ExecutorService.class), anyString())).willReturn(mockConnection);
+		given(mockConnection.isOpen()).willReturn(true);
+		given(mockConnection.createChannel()).willReturn(mockChannel);
+		given(mockChannel.txSelect()).willReturn(mock(SelectOk.class));
+		given(mockChannel.txCommit()).willThrow(IllegalStateException.class);
+		SingleConnectionFactory connectionFactory = new SingleConnectionFactory(mockConnectionFactory);
+		connectionFactory.setExecutor(mock(ExecutorService.class));
+		RabbitTemplate template = new RabbitTemplate(connectionFactory);
+		template.setChannelTransacted(true);
+		TransactionTemplate tt = new TransactionTemplate(new RabbitTransactionManager(connectionFactory));
+		assertThatIllegalStateException()
+			.isThrownBy(() ->
+				tt.execute(status -> {
+					template.convertAndSend("foo", "bar");
+					return null;
+				}));
+		assertThat(TransactionSynchronizationManager.hasResource(connectionFactory)).isFalse();
+		assertThatIllegalStateException()
+			.isThrownBy(() -> (TransactionSynchronizationManager.getSynchronizations()).isEmpty())
+			.withMessage("Transaction synchronization is not active");
+	}
+
+	@Test
+	void resourcesClearedAfterTxFailsWithSync() throws IOException, TimeoutException {
+		ConnectionFactoryUtils.enableAfterCompletionFailureCapture(true);
+		ConnectionFactory mockConnectionFactory = mock(ConnectionFactory.class);
+		Connection mockConnection = mock(Connection.class);
+		Channel mockChannel = mock(Channel.class);
+
+		given(mockConnectionFactory.newConnection(any(ExecutorService.class), anyString())).willReturn(mockConnection);
+		given(mockConnection.isOpen()).willReturn(true);
+		given(mockConnection.createChannel()).willReturn(mockChannel);
+		given(mockChannel.txSelect()).willReturn(mock(SelectOk.class));
+		given(mockChannel.txCommit()).willThrow(IllegalStateException.class);
+		SingleConnectionFactory connectionFactory = new SingleConnectionFactory(mockConnectionFactory);
+		connectionFactory.setExecutor(mock(ExecutorService.class));
+		RabbitTemplate template = new RabbitTemplate(connectionFactory);
+		template.setChannelTransacted(true);
+		TransactionTemplate tt = new TransactionTemplate(new TestTransactionManager());
+		tt.execute(status -> {
+			template.convertAndSend("foo", "bar");
+			return null;
+		});
+		assertThat(TransactionSynchronizationManager.hasResource(connectionFactory)).isFalse();
+		assertThatIllegalStateException()
+			.isThrownBy(() -> (TransactionSynchronizationManager.getSynchronizations()).isEmpty())
+			.withMessage("Transaction synchronization is not active");
+		assertThatExceptionOfType(AfterCompletionFailedException.class)
+			.isThrownBy(() -> ConnectionFactoryUtils.checkAfterCompletion());
+		ConnectionFactoryUtils.enableAfterCompletionFailureCapture(false);
 	}
 
 	@SuppressWarnings("serial")

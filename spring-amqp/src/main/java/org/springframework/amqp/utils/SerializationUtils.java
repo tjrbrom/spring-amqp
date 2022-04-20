@@ -26,7 +26,6 @@ import java.io.ObjectStreamClass;
 import java.util.Set;
 
 import org.springframework.core.ConfigurableObjectInputStream;
-import org.springframework.core.NestedIOException;
 import org.springframework.util.ObjectUtils;
 import org.springframework.util.PatternMatchUtils;
 
@@ -35,6 +34,7 @@ import org.springframework.util.PatternMatchUtils;
  *
  * @author Dave Syer
  * @author Gary Russell
+ * @author Artem Bilan
  */
 public final class SerializationUtils {
 
@@ -101,43 +101,43 @@ public final class SerializationUtils {
 	/**
 	 * Deserialize the stream.
 	 * @param inputStream the stream.
-	 * @param whiteListPatterns allowed classes.
+	 * @param allowedListPatterns allowed classes.
 	 * @param classLoader the class loader.
 	 * @return the result.
 	 * @throws IOException IO Exception.
 	 * @since 2.1
 	 */
-	public static Object deserialize(InputStream inputStream, Set<String> whiteListPatterns, ClassLoader classLoader)
+	public static Object deserialize(InputStream inputStream, Set<String> allowedListPatterns, ClassLoader classLoader)
 			throws IOException {
 
 		try (
-			ObjectInputStream objectInputStream = new ConfigurableObjectInputStream(inputStream, classLoader) {
+				ObjectInputStream objectInputStream = new ConfigurableObjectInputStream(inputStream, classLoader) {
 
-				@Override
-				protected Class<?> resolveClass(ObjectStreamClass classDesc)
-						throws IOException, ClassNotFoundException {
-					Class<?> clazz = super.resolveClass(classDesc);
-					checkWhiteList(clazz, whiteListPatterns);
-					return clazz;
-				}
+					@Override
+					protected Class<?> resolveClass(ObjectStreamClass classDesc)
+							throws IOException, ClassNotFoundException {
+						Class<?> clazz = super.resolveClass(classDesc);
+						checkAllowedList(clazz, allowedListPatterns);
+						return clazz;
+					}
 
-			}) {
+				}) {
 
 			return objectInputStream.readObject();
 		}
 		catch (ClassNotFoundException ex) {
-			throw new NestedIOException("Failed to deserialize object type", ex);
+			throw new IOException("Failed to deserialize object type", ex);
 		}
 	}
 
 	/**
-	 * Verify that the class is in the white list.
+	 * Verify that the class is in the allowed list.
 	 * @param clazz the class.
-	 * @param whiteListPatterns the patterns.
+	 * @param patterns the patterns.
 	 * @since 2.1
 	 */
-	public static void checkWhiteList(Class<?> clazz, Set<String> whiteListPatterns) {
-		if (ObjectUtils.isEmpty(whiteListPatterns)) {
+	public static void checkAllowedList(Class<?> clazz, Set<String> patterns) {
+		if (ObjectUtils.isEmpty(patterns)) {
 			return;
 		}
 		if (clazz.isArray() || clazz.isPrimitive() || clazz.equals(String.class)
@@ -145,7 +145,7 @@ public final class SerializationUtils {
 			return;
 		}
 		String className = clazz.getName();
-		for (String pattern : whiteListPatterns) {
+		for (String pattern : patterns) {
 			if (PatternMatchUtils.simpleMatch(pattern, className)) {
 				return;
 			}

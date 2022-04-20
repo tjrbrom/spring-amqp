@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 the original author or authors.
+ * Copyright 2019-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,15 +23,24 @@ import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
+import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.junit.RabbitAvailable;
 import org.springframework.amqp.rabbit.junit.RabbitAvailableCondition;
+import org.springframework.amqp.rabbit.listener.adapter.ReplyPostProcessor;
+import org.springframework.amqp.rabbit.listener.api.RabbitListenerErrorHandler;
+import org.springframework.amqp.support.converter.ContentTypeDelegatingMessageConverter;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
+import org.springframework.amqp.support.converter.MessageConverter;
+import org.springframework.amqp.support.converter.SimpleMessageConverter;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.task.SimpleAsyncTaskExecutor;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 
@@ -43,7 +52,7 @@ import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 @SpringJUnitConfig
 @DirtiesContext
 @RabbitAvailable(queues = { "EnableRabbitReturnTypesTests.1", "EnableRabbitReturnTypesTests.2",
-		"EnableRabbitReturnTypesTests.3", "EnableRabbitReturnTypesTests.4" })
+		"EnableRabbitReturnTypesTests.3", "EnableRabbitReturnTypesTests.4", "EnableRabbitReturnTypesTests.5" })
 public class EnableRabbitReturnTypesTests {
 
 	@Test
@@ -77,6 +86,14 @@ public class EnableRabbitReturnTypesTests {
 		assertThat(reply).isInstanceOf(Four.class);
 	}
 
+	@Test
+	void testReturnContentType(@Autowired RabbitTemplate template) {
+		Message reply = template.sendAndReceive("EnableRabbitReturnTypesTests.5",
+				new Message("foo".getBytes(), new MessageProperties()));
+		assertThat(reply.getBody()).isEqualTo("FOO".getBytes());
+		assertThat(reply.getMessageProperties().getContentType()).isEqualTo("foo/bar");
+	}
+
 	@Configuration(proxyBeanMethods = false)
 	@EnableRabbit
 	public static class Config<O extends One> {
@@ -105,11 +122,34 @@ public class EnableRabbitReturnTypesTests {
 		}
 
 		@Bean
+		public RabbitAdmin admin(CachingConnectionFactory cf) {
+			return new RabbitAdmin(cf);
+		}
+
+		@Bean
 		public Jackson2JsonMessageConverter converter() {
 			return new Jackson2JsonMessageConverter();
 		}
 
-		@RabbitListener(queues = "EnableRabbitReturnTypesTests.1")
+		@Bean
+		public SimpleAsyncTaskExecutor exec() {
+			return new SimpleAsyncTaskExecutor();
+		}
+
+		@Bean
+		public ReplyPostProcessor rpp() {
+			return (in, out) -> out;
+		}
+
+		@Bean
+		public RabbitListenerErrorHandler rleh() {
+			return (amqpMessage, message, exception) -> null;
+		}
+
+		@RabbitListener(queues = "EnableRabbitReturnTypesTests.1", admin = "#{@admin}",
+				containerFactory = "#{@rabbitListenerContainerFactory}",
+				executor = "#{@exec}", replyPostProcessor = "#{@rpp}", messageConverter = "#{@converter}",
+				errorHandler = "#{@rleh}")
 		public One listen1(String in) {
 			if ("3".equals(in)) {
 				return new Three();
@@ -145,6 +185,21 @@ public class EnableRabbitReturnTypesTests {
 			else {
 				return (O) new Four();
 			}
+		}
+
+		@RabbitListener(queues = "EnableRabbitReturnTypesTests.5", messageConverter = "delegating",
+				replyContentType = "foo/bar", converterWinsContentType = "false")
+		public String listen5(String in) {
+			return in.toUpperCase();
+		}
+
+		@Bean
+		public MessageConverter delegating() {
+			ContentTypeDelegatingMessageConverter converter = new ContentTypeDelegatingMessageConverter();
+			SimpleMessageConverter messageConverter = new SimpleMessageConverter();
+			converter.addDelegate("foo/bar", messageConverter);
+			converter.addDelegate("text/plain", messageConverter);
+			return converter;
 		}
 
 	}

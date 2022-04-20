@@ -1,5 +1,5 @@
 /*
- * Copyright 2018-2019 the original author or authors.
+ * Copyright 2018-2022 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,6 +33,7 @@ import org.springframework.lang.Nullable;
 import org.springframework.util.Assert;
 import org.springframework.util.ClassUtils;
 import org.springframework.util.MimeType;
+import org.springframework.util.MimeTypeUtils;
 
 import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -61,13 +62,18 @@ public abstract class AbstractJackson2MessageConverter extends AbstractMessageCo
 	 */
 	public static final Charset DEFAULT_CHARSET = StandardCharsets.UTF_8;
 
-	/**
-	 * The supported content type; only the subtype is checked, e.g. *&#47;json,
-	 * *&#47;xml.
-	 */
-	private final MimeType supportedContentType;
-
 	protected final ObjectMapper objectMapper; // NOSONAR protected
+
+	/**
+	 * The supported content type; only the subtype is checked when decoding, e.g.
+	 * *&#47;json, *&#47;xml. If this contains a charset parameter, when encoding, the
+	 * contentType header will not be set, when decoding, the raw bytes are passed to
+	 * Jackson which can dynamically determine the encoding; otherwise the contentEncoding
+	 * or default charset is used.
+	 */
+	private MimeType supportedContentType;
+
+	private String supportedCTCharset;
 
 	@Nullable
 	private ClassMapper classMapper = null;
@@ -84,15 +90,20 @@ public abstract class AbstractJackson2MessageConverter extends AbstractMessageCo
 
 	private ProjectingMessageConverter projectingConverter;
 
-	private boolean standardCharset;
+	private boolean charsetIsUtf8 = true;
 
 	private boolean assumeSupportedContentType = true;
+
+	private boolean alwaysConvertToInferredType;
 
 	/**
 	 * Construct with the provided {@link ObjectMapper} instance.
 	 * @param objectMapper the {@link ObjectMapper} to use.
-	 * @param contentType supported content type when decoding messages, only the subtype
-	 * is checked, e.g. *&#47;json, *&#47;xml.
+	 * @param contentType the supported content type; only the subtype is checked when
+	 * decoding, e.g. *&#47;json, *&#47;xml. If this contains a charset parameter, when
+	 * encoding, the contentType header will not be set, when decoding, the raw bytes are
+	 * passed to Jackson which can dynamically determine the encoding; otherwise the
+	 * contentEncoding or default charset is used.
 	 * @param trustedPackages the trusted Java packages for deserialization
 	 * @see DefaultJackson2JavaTypeMapper#setTrustedPackages(String...)
 	 */
@@ -103,8 +114,40 @@ public abstract class AbstractJackson2MessageConverter extends AbstractMessageCo
 		Assert.notNull(contentType, "'contentType' must not be null");
 		this.objectMapper = objectMapper;
 		this.supportedContentType = contentType;
+		this.supportedCTCharset = this.supportedContentType.getParameter("charset");
 		((DefaultJackson2JavaTypeMapper) this.javaTypeMapper).setTrustedPackages(trustedPackages);
 	}
+
+
+	/**
+	 * Get the supported content type; only the subtype is checked when decoding, e.g.
+	 * *&#47;json, *&#47;xml. If this contains a charset parameter, when encoding, the
+	 * contentType header will not be set, when decoding, the raw bytes are passed to
+	 * Jackson which can dynamically determine the encoding; otherwise the contentEncoding
+	 * or default charset is used.
+	 * @return the supportedContentType
+	 * @since 2.4.3
+	 */
+	protected MimeType getSupportedContentType() {
+		return this.supportedContentType;
+	}
+
+
+	/**
+	 * Set the supported content type; only the subtype is checked when decoding, e.g.
+	 * *&#47;json, *&#47;xml. If this contains a charset parameter, when encoding, the
+	 * contentType header will not be set, when decoding, the raw bytes are passed to
+	 * Jackson which can dynamically determine the encoding; otherwise the contentEncoding
+	 * or default charset is used.
+	 * @param supportedContentType the supportedContentType to set.
+	 * @since 2.4.3
+	 */
+	public void setSupportedContentType(MimeType supportedContentType) {
+		Assert.notNull(supportedContentType, "'supportedContentType' cannot be null");
+		this.supportedContentType = supportedContentType;
+		this.supportedCTCharset = this.supportedContentType.getParameter("charset");
+	}
+
 
 	@Nullable
 	public ClassMapper getClassMapper() {
@@ -123,9 +166,7 @@ public abstract class AbstractJackson2MessageConverter extends AbstractMessageCo
 	public void setDefaultCharset(@Nullable String defaultCharset) {
 		this.defaultCharset = (defaultCharset != null) ? Charset.forName(defaultCharset)
 				: DEFAULT_CHARSET;
-		if (this.defaultCharset.equals(StandardCharsets.UTF_8)) {
-			this.standardCharset = true;
-		}
+		this.charsetIsUtf8 = this.defaultCharset.equals(StandardCharsets.UTF_8);
 	}
 
 	public String getDefaultCharset() {
@@ -201,6 +242,18 @@ public abstract class AbstractJackson2MessageConverter extends AbstractMessageCo
 		}
 	}
 
+	/**
+	 * When false (default), fall back to type id headers if the type (or contents of a container
+	 * type) is abstract. Set to true if conversion should always be attempted - perhaps because
+	 * a custom deserializer has been configured on the {@link ObjectMapper}. If the attempt fails,
+	 * fall back to headers.
+	 * @param alwaysAttemptConversion true to attempt.
+	 * @since 2.2.8
+	 */
+	public void setAlwaysConvertToInferredType(boolean alwaysAttemptConversion) {
+		this.alwaysConvertToInferredType = alwaysAttemptConversion;
+	}
+
 	protected boolean isUseProjectionForInterfaces() {
 		return this.useProjectionForInterfaces;
 	}
@@ -252,10 +305,7 @@ public abstract class AbstractJackson2MessageConverter extends AbstractMessageCo
 			if ((this.assumeSupportedContentType // NOSONAR Boolean complexity
 					&& (contentType == null || contentType.equals(MessageProperties.DEFAULT_CONTENT_TYPE)))
 					|| (contentType != null && contentType.contains(this.supportedContentType.getSubtype()))) {
-				String encoding = properties.getContentEncoding();
-				if (encoding == null) {
-					encoding = getDefaultCharset();
-				}
+				String encoding = determineEncoding(properties, contentType);
 				content = doFromMessage(message, conversionHint, properties, encoding);
 			}
 			else {
@@ -271,17 +321,53 @@ public abstract class AbstractJackson2MessageConverter extends AbstractMessageCo
 		return content;
 	}
 
+	private String determineEncoding(MessageProperties properties, @Nullable String contentType) {
+		String encoding = properties.getContentEncoding();
+		if (encoding == null && contentType != null) {
+			try {
+				MimeType mimeType = MimeTypeUtils.parseMimeType(contentType);
+				if (mimeType != null) {
+					encoding = mimeType.getParameter("charset");
+				}
+			}
+			catch (RuntimeException e) {
+			}
+		}
+		if (encoding == null) {
+			encoding = this.supportedCTCharset != null ? this.supportedCTCharset : getDefaultCharset();
+		}
+		return encoding;
+	}
+
 	private Object doFromMessage(Message message, Object conversionHint, MessageProperties properties,
 			String encoding) {
 
-		Object content;
+		Object content = null;
 		try {
-			JavaType inferredType = this.javaTypeMapper.getInferredType(properties);
-			if (inferredType != null && this.useProjectionForInterfaces && inferredType.isInterface()
-					&& !inferredType.getRawClass().getPackage().getName().startsWith("java.util")) { // List etc
-				content = this.projectingConverter.convert(message, inferredType.getRawClass());
-			}
-			else if (conversionHint instanceof ParameterizedTypeReference) {
+			content = convertContent(message, conversionHint, properties, encoding);
+		}
+		catch (IOException e) {
+			throw new MessageConversionException(
+					"Failed to convert Message content", e);
+		}
+		return content;
+	}
+
+	private Object convertContent(Message message, Object conversionHint, MessageProperties properties, String encoding)
+			throws IOException {
+
+		Object content = null;
+		JavaType inferredType = this.javaTypeMapper.getInferredType(properties);
+		if (inferredType != null && this.useProjectionForInterfaces && inferredType.isInterface()
+				&& !inferredType.getRawClass().getPackage().getName().startsWith("java.util")) { // List etc
+			content = this.projectingConverter.convert(message, inferredType.getRawClass());
+			properties.setProjectionUsed(true);
+		}
+		else if (inferredType != null && this.alwaysConvertToInferredType) {
+			content = tryConverType(message, encoding, inferredType);
+		}
+		if (content == null) {
+			if (conversionHint instanceof ParameterizedTypeReference) {
 				content = convertBytesToObject(message.getBody(), encoding,
 						this.objectMapper.getTypeFactory().constructType(
 								((ParameterizedTypeReference<?>) conversionHint).getType()));
@@ -299,19 +385,36 @@ public abstract class AbstractJackson2MessageConverter extends AbstractMessageCo
 						encoding, targetClass);
 			}
 		}
-		catch (IOException e) {
-			throw new MessageConversionException(
-					"Failed to convert Message content", e);
-		}
 		return content;
 	}
 
+	/*
+	 * Unfortunately, mapper.canDeserialize() always returns true (adds an AbstractDeserializer
+	 * to the cache); so all we can do is try a conversion.
+	 */
+	@Nullable
+	private Object tryConverType(Message message, String encoding, JavaType inferredType) {
+		try {
+			return convertBytesToObject(message.getBody(), encoding, inferredType);
+		}
+		catch (Exception e) {
+			this.log.trace("Cannot create possibly abstract container contents; falling back to headers", e);
+			return null;
+		}
+	}
+
 	private Object convertBytesToObject(byte[] body, String encoding, JavaType targetJavaType) throws IOException {
+		if (this.supportedCTCharset != null) { // Jackson will determine encoding
+			return this.objectMapper.readValue(body, targetJavaType);
+		}
 		String contentAsString = new String(body, encoding);
 		return this.objectMapper.readValue(contentAsString, targetJavaType);
 	}
 
 	private Object convertBytesToObject(byte[] body, String encoding, Class<?> targetClass) throws IOException {
+		if (this.supportedCTCharset != null) { // Jackson will determine encoding
+			return this.objectMapper.readValue(body, this.objectMapper.constructType(targetClass));
+		}
 		String contentAsString = new String(body, encoding);
 		return this.objectMapper.readValue(contentAsString, this.objectMapper.constructType(targetClass));
 	}
@@ -329,20 +432,23 @@ public abstract class AbstractJackson2MessageConverter extends AbstractMessageCo
 
 		byte[] bytes;
 		try {
-			if (this.standardCharset) {
+			if (this.charsetIsUtf8 && this.supportedCTCharset == null) {
 				bytes = this.objectMapper.writeValueAsBytes(objectToConvert);
 			}
 			else {
 				String jsonString = this.objectMapper
 						.writeValueAsString(objectToConvert);
-				bytes = jsonString.getBytes(getDefaultCharset());
+				String encoding = this.supportedCTCharset != null ? this.supportedCTCharset : getDefaultCharset();
+				bytes = jsonString.getBytes(encoding);
 			}
 		}
 		catch (IOException e) {
 			throw new MessageConversionException("Failed to convert Message content", e);
 		}
 		messageProperties.setContentType(this.supportedContentType.toString());
-		messageProperties.setContentEncoding(getDefaultCharset());
+		if (this.supportedCTCharset == null) {
+			messageProperties.setContentEncoding(getDefaultCharset());
+		}
 		messageProperties.setContentLength(bytes.length);
 
 		if (getClassMapper() == null) {

@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2019 the original author or authors.
+ * Copyright 2016-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@
 package org.springframework.amqp.rabbit.listener;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -26,9 +28,10 @@ import static org.mockito.BDDMockito.willAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -36,7 +39,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.aopalliance.intercept.MethodInterceptor;
-import org.apache.commons.logging.LogFactory;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -44,6 +46,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 import org.mockito.ArgumentCaptor;
 
+import org.springframework.amqp.AmqpAuthenticationException;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.Connection;
@@ -101,6 +104,8 @@ public class DirectMessageListenerContainerIntegrationTests {
 
 	public static final String DLQ1 = "testDLQ1.DirectMessageListenerContainerIntegrationTests";
 
+	private static final String MISSING = "missing.DirectMessageListenerContainerIntegrationTests";
+
 	private static CachingConnectionFactory adminCf;
 
 	private static RabbitAdmin admin;
@@ -121,6 +126,15 @@ public class DirectMessageListenerContainerIntegrationTests {
 	@BeforeEach
 	public void captureTestName(TestInfo info) {
 		this.testName = info.getDisplayName();
+	}
+
+	@Test
+	void authFailed() {
+		CachingConnectionFactory cf = new CachingConnectionFactory("localhost");
+		cf.setUsername("junk");
+		DirectMessageListenerContainer dmlc = new DirectMessageListenerContainer(cf);
+		dmlc.setPossibleAuthenticationFailureFatal(true);
+		assertThatExceptionOfType(AmqpAuthenticationException.class).isThrownBy(() -> dmlc.start());
 	}
 
 	@SuppressWarnings("unchecked")
@@ -431,11 +445,7 @@ public class DirectMessageListenerContainerIntegrationTests {
 
 		// Since backOff exhausting makes listenerContainer as invalid (calls stop()),
 		// it is enough to check the listenerContainer activity
-		int n = 0;
-		while (container.isActive() && n++ < 100) {
-			Thread.sleep(100);
-		}
-		assertThat(container.isActive()).isFalse();
+		await().until(() -> !container.isActive());
 	}
 
 	@Test
@@ -636,11 +646,7 @@ public class DirectMessageListenerContainerIntegrationTests {
 		container.afterPropertiesSet();
 		container.start();
 
-		int n = 0;
-		while (n++ < 100 && container.isRunning()) {
-			Thread.sleep(100);
-		}
-		assertThat(container.isRunning()).isFalse();
+		await().until(() -> !container.isActive());
 	}
 
 	@Test
@@ -663,11 +669,7 @@ public class DirectMessageListenerContainerIntegrationTests {
 		assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
 		cf.onApplicationEvent(new ContextClosedEvent(context));
 		cf.destroy();
-		int n = 0;
-		while (n++ < 100 && container.isRunning()) {
-			Thread.sleep(100);
-		}
-		assertThat(container.isRunning()).isFalse();
+		await().until(() -> !container.isActive());
 	}
 
 	@Test
@@ -691,35 +693,52 @@ public class DirectMessageListenerContainerIntegrationTests {
 		cf.destroy();
 	}
 
+	@Test
+	void missingQueueOnStart() throws InterruptedException {
+		CachingConnectionFactory cf = new CachingConnectionFactory("localhost");
+		RabbitAdmin admin = new RabbitAdmin(cf);
+		admin.deleteQueue(MISSING);
+		DirectMessageListenerContainer container = new DirectMessageListenerContainer(cf);
+		container.setQueueNames(MISSING);
+		container.setBeanName("missingQOnStart");
+		final CountDownLatch latch = new CountDownLatch(1);
+		container.setApplicationEventPublisher(event -> {
+			if (event instanceof MissingQueueEvent) {
+				admin.declareQueue(new Queue(MISSING));
+			}
+			else if (event instanceof AsyncConsumerStartedEvent) {
+				latch.countDown();
+			}
+		});
+		container.setMonitorInterval(500);
+		container.setFailedDeclarationRetryInterval(500);
+		container.afterPropertiesSet();
+		container.start();
+		assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
+		container.stop();
+		admin.deleteQueue(MISSING);
+		cf.destroy();
+	}
+
 	private boolean consumersOnQueue(String queue, int expected) throws Exception {
-		int n = 0;
-		Properties queueProperties = admin.getQueueProperties(queue);
-		LogFactory.getLog(getClass()).debug(queue + " waiting for " + expected + " : " + queueProperties);
-		while (n++ < 600
-				&& (queueProperties == null || !queueProperties.get(RabbitAdmin.QUEUE_CONSUMER_COUNT).equals(expected))) {
-			Thread.sleep(100);
-			queueProperties = admin.getQueueProperties(queue);
-			LogFactory.getLog(getClass()).debug(queue + " waiting for " + expected + " : " + queueProperties);
-		}
-		return queueProperties.get(RabbitAdmin.QUEUE_CONSUMER_COUNT).equals(expected);
+		await().with().pollDelay(Duration.ZERO).atMost(Duration.ofSeconds(60))
+				.until(() -> admin.getQueueProperties(queue),
+						props -> props != null && props.get(RabbitAdmin.QUEUE_CONSUMER_COUNT).equals(expected));
+		return true;
 	}
 
 	private boolean activeConsumerCount(AbstractMessageListenerContainer container, int expected) throws Exception {
-		int n = 0;
 		List<?> consumers = TestUtils.getPropertyValue(container, "consumers", List.class);
-		while (n++ < 600 && consumers.size() != expected) {
-			Thread.sleep(100);
-		}
-		return consumers.size() == expected;
+		await().with().pollDelay(Duration.ZERO).atMost(Duration.ofSeconds(60))
+				.until(() -> consumers.size() == expected);
+		return true;
 	}
 
 	private boolean restartConsumerCount(AbstractMessageListenerContainer container, int expected) throws Exception {
-		int n = 0;
-		List<?> consumers = TestUtils.getPropertyValue(container, "consumersToRestart", List.class);
-		while (n++ < 600 && consumers.size() != expected) {
-			Thread.sleep(100);
-		}
-		return consumers.size() == expected;
+		Set<?> consumers = TestUtils.getPropertyValue(container, "consumersToRestart", Set.class);
+		await().with().pollDelay(Duration.ZERO).atMost(Duration.ofSeconds(60))
+				.until(() -> consumers.size() == expected);
+		return true;
 	}
 
 	public class Tag implements ConsumerTagStrategy {

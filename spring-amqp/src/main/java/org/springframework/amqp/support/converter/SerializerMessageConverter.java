@@ -22,16 +22,17 @@ import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectStreamClass;
 import java.io.UnsupportedEncodingException;
+import java.nio.charset.StandardCharsets;
 
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.beans.DirectFieldAccessor;
 import org.springframework.core.ConfigurableObjectInputStream;
-import org.springframework.core.NestedIOException;
 import org.springframework.core.serializer.DefaultDeserializer;
 import org.springframework.core.serializer.DefaultSerializer;
 import org.springframework.core.serializer.Deserializer;
 import org.springframework.core.serializer.Serializer;
+import org.springframework.lang.Nullable;
 
 /**
  * Implementation of {@link MessageConverter} that can work with Strings or native objects
@@ -41,16 +42,17 @@ import org.springframework.core.serializer.Serializer;
  * {@link MessageProperties#getContentType() content-type} of the provided Message.
  * <p>
  * If a {@link DefaultDeserializer} is configured (default),
- * the {@link #setWhiteListPatterns(java.util.List) white list patterns} will be applied
+ * the {@link #setAllowedListPatterns(java.util.List) allowed patterns} will be applied
  * (if configured); for all other deserializers, the deserializer is responsible for
  * checking classes, if necessary.
  *
  * @author Dave Syer
  * @author Gary Russell
+ * @author Artem Bilan
  */
-public class SerializerMessageConverter extends WhiteListDeserializingMessageConverter {
+public class SerializerMessageConverter extends AllowedListDeserializingMessageConverter {
 
-	public static final String DEFAULT_CHARSET = "UTF-8";
+	public static final String DEFAULT_CHARSET = StandardCharsets.UTF_8.name();
 
 	private volatile String defaultCharset = DEFAULT_CHARSET;
 
@@ -80,7 +82,7 @@ public class SerializerMessageConverter extends WhiteListDeserializingMessageCon
 	 *
 	 * @param defaultCharset The default charset.
 	 */
-	public void setDefaultCharset(String defaultCharset) {
+	public void setDefaultCharset(@Nullable String defaultCharset) {
 		this.defaultCharset = (defaultCharset != null) ? defaultCharset : DEFAULT_CHARSET;
 	}
 
@@ -174,7 +176,7 @@ public class SerializerMessageConverter extends WhiteListDeserializingMessageCon
 				protected Class<?> resolveClass(ObjectStreamClass classDesc)
 						throws IOException, ClassNotFoundException {
 					Class<?> clazz = super.resolveClass(classDesc);
-					checkWhiteList(clazz);
+					checkAllowedList(clazz);
 					return clazz;
 				}
 
@@ -182,7 +184,7 @@ public class SerializerMessageConverter extends WhiteListDeserializingMessageCon
 			return objectInputStream.readObject();
 		}
 		catch (ClassNotFoundException ex) {
-			throw new NestedIOException("Failed to deserialize object type", ex);
+			throw new IOException("Failed to deserialize object type", ex);
 		}
 	}
 

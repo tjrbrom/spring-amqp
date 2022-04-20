@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2020 the original author or authors.
+ * Copyright 2002-2022 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -44,12 +44,12 @@ import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.amqp.core.Address;
 import org.springframework.amqp.core.AmqpMessageReturnedException;
 import org.springframework.amqp.core.Message;
-import org.springframework.amqp.core.MessageListener;
 import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.core.ReceiveAndReplyCallback;
 import org.springframework.amqp.core.ReceiveAndReplyMessageCallback;
 import org.springframework.amqp.core.ReplyToAddressCallback;
+import org.springframework.amqp.core.ReturnedMessage;
 import org.springframework.amqp.rabbit.connection.AbstractRoutingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ChannelProxy;
 import org.springframework.amqp.rabbit.connection.ClosingRecoveryListener;
@@ -62,9 +62,11 @@ import org.springframework.amqp.rabbit.connection.PublisherCallbackChannel;
 import org.springframework.amqp.rabbit.connection.RabbitAccessor;
 import org.springframework.amqp.rabbit.connection.RabbitResourceHolder;
 import org.springframework.amqp.rabbit.connection.RabbitUtils;
+import org.springframework.amqp.rabbit.connection.ThreadChannelConnectionFactory;
 import org.springframework.amqp.rabbit.listener.AbstractMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.DirectReplyToMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.DirectReplyToMessageListenerContainer.ChannelHolder;
+import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.support.ConsumerCancelledException;
 import org.springframework.amqp.rabbit.support.DefaultMessagePropertiesConverter;
 import org.springframework.amqp.rabbit.support.Delivery;
@@ -103,6 +105,7 @@ import com.rabbitmq.client.ConfirmListener;
 import com.rabbitmq.client.DefaultConsumer;
 import com.rabbitmq.client.Envelope;
 import com.rabbitmq.client.GetResponse;
+import com.rabbitmq.client.Return;
 import com.rabbitmq.client.ShutdownListener;
 import com.rabbitmq.client.ShutdownSignalException;
 
@@ -144,11 +147,12 @@ import com.rabbitmq.client.ShutdownSignalException;
  * @author Mark Norkin
  * @author Mohammad Hewedy
  * @author Alexey Platonov
+ * @author Leonardo Ferreira
  *
  * @since 1.0
  */
 public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
-		implements BeanFactoryAware, RabbitOperations, MessageListener,
+		implements BeanFactoryAware, RabbitOperations, ChannelAwareMessageListener,
 		ListenerContainerAware, PublisherCallbackChannel.Listener, BeanNameAware, DisposableBean {
 
 	private static final String UNCHECKED = "unchecked";
@@ -178,7 +182,7 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 	private final ConcurrentMap<Channel, RabbitTemplate> publisherConfirmChannels =
 			new ConcurrentHashMap<Channel, RabbitTemplate>();
 
-	private final Map<String, PendingReply> replyHolder = new ConcurrentHashMap<String, PendingReply>();
+	private final Map<Object, PendingReply> replyHolder = new ConcurrentHashMap<Object, PendingReply>();
 
 	private final String uuid = UUID.randomUUID().toString();
 
@@ -216,7 +220,7 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 	@Nullable
 	private ConfirmCallback confirmCallback;
 
-	private ReturnCallback returnCallback;
+	private ReturnsCallback returnsCallback;
 
 	private Expression mandatoryExpression = new ValueExpression<Boolean>(false);
 
@@ -254,22 +258,19 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 
 	private ErrorHandler replyErrorHandler;
 
-	private volatile Boolean confirmsOrReturnsCapable;
-
-	private volatile boolean publisherConfirms;
-
 	private volatile boolean usingFastReplyTo;
 
 	private volatile boolean evaluatedFastReplyTo;
 
 	private volatile boolean isListener;
 
+	private boolean useChannelForCorrelation;
+
 	/**
 	 * Convenient constructor for use with setter injection. Don't forget to set the connection factory.
 	 */
 	public RabbitTemplate() {
 		initDefaultStrategies(); // NOSONAR - intentionally overridable; other assertions will check
-
 	}
 
 	/**
@@ -286,6 +287,14 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 	 */
 	protected void initDefaultStrategies() {
 		setMessageConverter(new SimpleMessageConverter());
+	}
+
+	@Override
+	public final void setConnectionFactory(ConnectionFactory connectionFactory) {
+		super.setConnectionFactory(connectionFactory);
+		if (connectionFactory instanceof ThreadChannelConnectionFactory) {
+			this.usePublisherConnection = true;
+		}
 	}
 
 	/**
@@ -334,6 +343,16 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 	 */
 	public void setDefaultReceiveQueue(String queue) {
 		this.defaultReceiveQueue = queue;
+	}
+
+	/**
+	 * Return the configured default receive queue.
+	 * @return the queue or null if not configured.
+	 * @since 2.2.22
+	 */
+	@Nullable
+	public String getDefaultReceiveQueue() {
+		return this.defaultReceiveQueue;
 	}
 
 	/**
@@ -444,20 +463,46 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 	}
 
 	public void setConfirmCallback(ConfirmCallback confirmCallback) {
-		Assert.state(this.confirmCallback == null || this.confirmCallback == confirmCallback,
+		Assert.state(this.confirmCallback == null || this.confirmCallback.equals(confirmCallback),
 				"Only one ConfirmCallback is supported by each RabbitTemplate");
 		this.confirmCallback = confirmCallback;
 	}
 
+	/**
+	 * Set a callback to receive returned messages.
+	 * @param returnCallback the callback.
+	 * @deprecated in favor of {@link #setReturnsCallback(ReturnsCallback)}.
+	 */
+	@Deprecated
 	public void setReturnCallback(ReturnCallback returnCallback) {
-		Assert.state(this.returnCallback == null || this.returnCallback == returnCallback,
+		ReturnCallback delegate = this.returnsCallback == null ? null : this.returnsCallback.delegate();
+		Assert.state(this.returnsCallback == null || delegate == null || delegate.equals(returnCallback),
 				"Only one ReturnCallback is supported by each RabbitTemplate");
-		this.returnCallback = returnCallback;
+		this.returnsCallback = new ReturnsCallback() {
+
+			@Override
+			public void returnedMessage(ReturnedMessage returned) {
+				returnCallback.returnedMessage(returned.getMessage(), returned.getReplyCode(), returned.getReplyText(),
+						returned.getExchange(), returned.getRoutingKey());
+			}
+
+			@Override
+			public ReturnCallback delegate() {
+				return returnCallback;
+			}
+
+		};
+	}
+
+	public void setReturnsCallback(ReturnsCallback returnCallback) {
+		Assert.state(this.returnsCallback == null || this.returnsCallback.equals(returnCallback),
+				"Only one ReturnCallback is supported by each RabbitTemplate");
+		this.returnsCallback = returnCallback;
 	}
 
 	/**
 	 * Set the mandatory flag when sending messages; only applies if a
-	 * {@link #setReturnCallback(ReturnCallback) returnCallback} had been provided.
+	 * {@link #setReturnsCallback(ReturnsCallback) returnCallback} had been provided.
 	 * @param mandatory the mandatory to set.
 	 */
 	public void setMandatory(boolean mandatory) {
@@ -466,7 +511,7 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 
 	/**
 	 * @param mandatoryExpression a SpEL {@link Expression} to evaluate against each
-	 * request message, if a {@link #setReturnCallback(ReturnCallback) returnCallback} has
+	 * request message, if a {@link #setReturnsCallback(ReturnsCallback) returnCallback} has
 	 * been provided. The result of the evaluation must be a {@code boolean} value.
 	 * @since 1.4
 	 */
@@ -477,7 +522,7 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 
 	/**
 	 * @param mandatoryExpression a SpEL {@link Expression} to evaluate against each
-	 * request message, if a {@link #setReturnCallback(ReturnCallback) returnCallback} has
+	 * request message, if a {@link #setReturnsCallback(ReturnsCallback) returnCallback} has
 	 * been provided. The result of the evaluation must be a {@code boolean} value.
 	 * @since 2.0
 	 */
@@ -785,10 +830,12 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 	}
 
 	/**
-	 * To avoid deadlocked connections, it is generally recommended to use
-	 * a separate connection for publishers and consumers (except when a publisher
-	 * is participating in a consumer transaction). Default 'false'; will change
-	 * to 'true' in 2.1.
+	 * To avoid deadlocked connections, it is generally recommended to use a separate
+	 * connection for publishers and consumers (except when a publisher is participating
+	 * in a consumer transaction). Default 'false'. When setting this to true, be careful
+	 * in that a {@link RabbitAdmin} that uses this template will declare queues on the
+	 * publisher connection; this may not be what you expect, especially with exclusive
+	 * queues that might be consumed in this application.
 	 * @param usePublisherConnection true to use a publisher connection.
 	 * @since 2.0.2
 	 */
@@ -816,6 +863,17 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 	 */
 	public void setReplyErrorHandler(ErrorHandler replyErrorHandler) {
 		this.replyErrorHandler = replyErrorHandler;
+	}
+
+	/**
+	 * When using direct reply-to, set this to true to avoid the server needing to
+	 * send the correlation id in a reply header. Use the channel to correlate the reply
+	 * to a request instead.
+	 * @param useChannelForCorrelation true to use the channel.
+	 * @since 2.3.7
+	 */
+	public void setUseChannelForCorrelation(boolean useChannelForCorrelation) {
+		this.useChannelForCorrelation = useChannelForCorrelation;
 	}
 
 	/**
@@ -998,6 +1056,11 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 	}
 
 	@Override
+	public void send(String routingKey, Message message, CorrelationData correlationData) throws AmqpException {
+		send(this.exchange, routingKey, message, correlationData);
+	}
+
+	@Override
 	public void send(final String exchange, final String routingKey, final Message message) throws AmqpException {
 		send(exchange, routingKey, message, null);
 	}
@@ -1008,10 +1071,9 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 			throws AmqpException {
 		execute(channel -> {
 			doSend(channel, exchange, routingKey, message,
-					(RabbitTemplate.this.returnCallback != null
+					(RabbitTemplate.this.returnsCallback != null
 							|| (correlationData != null && StringUtils.hasText(correlationData.getId())))
-							&& RabbitTemplate.this.mandatoryExpression.getValue(
-							RabbitTemplate.this.evaluationContext, message, Boolean.class),
+							&& isMandatoryFor(message),
 					correlationData);
 			return null;
 		}, obtainTargetConnectionFactory(this.sendConnectionFactorySelectorExpression, message));
@@ -1023,10 +1085,10 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 					(AbstractRoutingConnectionFactory) getConnectionFactory();
 			Object lookupKey;
 			if (rootObject != null) {
-				lookupKey = this.sendConnectionFactorySelectorExpression.getValue(this.evaluationContext, rootObject);
+				lookupKey = expression.getValue(this.evaluationContext, rootObject);
 			}
 			else {
-				lookupKey = this.sendConnectionFactorySelectorExpression.getValue(this.evaluationContext);
+				lookupKey = expression.getValue(this.evaluationContext);
 			}
 			if (lookupKey != null) {
 				ConnectionFactory connectionFactory = routingConnectionFactory.getTargetConnectionFactory(lookupKey);
@@ -1111,7 +1173,8 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 			final MessagePostProcessor messagePostProcessor,
 			@Nullable CorrelationData correlationData) throws AmqpException {
 		Message messageToSend = convertMessageIfNecessary(message);
-		messageToSend = messagePostProcessor.postProcessMessage(messageToSend, correlationData);
+		messageToSend = messagePostProcessor.postProcessMessage(messageToSend, correlationData,
+				nullSafeExchange(exchange), nullSafeRoutingKey(routingKey));
 		send(exchange, routingKey, messageToSend, correlationData);
 	}
 
@@ -1197,7 +1260,7 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 				}
 				return buildMessageFromDelivery(delivery);
 			}
-		});
+		}, obtainTargetConnectionFactory(this.receiveConnectionFactorySelectorExpression, null));
 		logReceived(message);
 		return message;
 	}
@@ -1404,7 +1467,7 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 		return delivery;
 	}
 
-	private void logReceived(Message message) {
+	private void logReceived(@Nullable Message message) {
 		if (message == null) {
 			logger.debug("Received no message");
 		}
@@ -1481,7 +1544,7 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 				replyTo.getExchangeName(),
 				replyTo.getRoutingKey(),
 				replyMessage,
-				RabbitTemplate.this.returnCallback != null && isMandatoryFor(replyMessage),
+				RabbitTemplate.this.returnsCallback != null && isMandatoryFor(replyMessage),
 				null);
 	}
 
@@ -1746,7 +1809,8 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 
 		Message requestMessage = convertMessageIfNecessary(message);
 		if (messagePostProcessor != null) {
-			requestMessage = messagePostProcessor.postProcessMessage(requestMessage, correlationData);
+			requestMessage = messagePostProcessor.postProcessMessage(requestMessage, correlationData,
+					nullSafeExchange(exchange), nullSafeRoutingKey(routingKey));
 		}
 		return doSendAndReceive(exchange, routingKey, requestMessage, correlationData);
 	}
@@ -1792,7 +1856,7 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 
 	@Nullable
 	protected Message doSendAndReceiveWithTemporary(final String exchange, final String routingKey,
-			final Message message, final CorrelationData correlationData) {
+			final Message message, @Nullable final CorrelationData correlationData) {
 
 		return execute(channel -> {
 			final PendingReply pendingReply = new PendingReply();
@@ -1868,17 +1932,18 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 
 	@Nullable
 	protected Message doSendAndReceiveWithFixed(final String exchange, final String routingKey, final Message message,
-			final CorrelationData correlationData) {
+			@Nullable final CorrelationData correlationData) {
+
 		Assert.state(this.isListener, () -> "RabbitTemplate is not configured as MessageListener - "
 				+ "cannot use a 'replyAddress': " + this.replyAddress);
 		return execute(channel -> {
-			return doSendAndReceiveAsListener(exchange, routingKey, message, correlationData, channel);
+			return doSendAndReceiveAsListener(exchange, routingKey, message, correlationData, channel, false);
 		}, obtainTargetConnectionFactory(this.sendConnectionFactorySelectorExpression, message));
 	}
 
 	@Nullable
 	private Message doSendAndReceiveWithDirect(String exchange, String routingKey, Message message,
-			CorrelationData correlationData) {
+			@Nullable CorrelationData correlationData) {
 		ConnectionFactory connectionFactory = obtainTargetConnectionFactory(
 				this.sendConnectionFactorySelectorExpression, message);
 		if (this.usePublisherConnection && connectionFactory.getPublisherConnectionFactory() != null) {
@@ -1886,69 +1951,78 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 		}
 		DirectReplyToMessageListenerContainer container = this.directReplyToContainers.get(connectionFactory);
 		if (container == null) {
-			synchronized (this.directReplyToContainers) {
-				container = this.directReplyToContainers.get(connectionFactory);
-				if (container == null) {
-					container = new DirectReplyToMessageListenerContainer(connectionFactory);
-					container.setMessageListener(this);
-					container.setBeanName(this.beanName + "#" + this.containerInstance.getAndIncrement());
-					if (this.taskExecutor != null) {
-						container.setTaskExecutor(this.taskExecutor);
-					}
-					if (this.afterReceivePostProcessors != null) {
-						container.setAfterReceivePostProcessors(this.afterReceivePostProcessors
-								.toArray(new MessagePostProcessor[this.afterReceivePostProcessors.size()]));
-					}
-					container.setNoLocal(this.noLocalReplyConsumer);
-					if (this.replyErrorHandler != null) {
-						container.setErrorHandler(this.replyErrorHandler);
-					}
-					container.start();
-					this.directReplyToContainers.put(connectionFactory, container);
-					this.replyAddress = Address.AMQ_RABBITMQ_REPLY_TO;
-				}
-			}
+			container = createReplyToContainer(connectionFactory);
 		}
 		ChannelHolder channelHolder = container.getChannelHolder();
+		boolean cancelConsumer = false;
 		try {
 			Channel channel = channelHolder.getChannel();
-			if (this.confirmsOrReturnsCapable) {
+			if (isPublisherConfirmsOrReturns(connectionFactory)) {
 				addListener(channel);
 			}
-			return doSendAndReceiveAsListener(exchange, routingKey, message, correlationData, channel);
+			Message reply = doSendAndReceiveAsListener(exchange, routingKey, message, correlationData, channel,
+					this.useChannelForCorrelation);
+			if (reply == null && this.useChannelForCorrelation) {
+				cancelConsumer = true;
+			}
+			return reply;
 		}
 		catch (Exception e) {
+			if (this.useChannelForCorrelation) {
+				cancelConsumer = true;
+			}
 			throw RabbitExceptionTranslator.convertRabbitAccessException(e);
 		}
 		finally {
-			container.releaseConsumerFor(channelHolder, false, null);
+			container.releaseConsumerFor(channelHolder, cancelConsumer, "Reply failed; consumer cannot be reused");
 		}
+	}
+
+	private DirectReplyToMessageListenerContainer createReplyToContainer(ConnectionFactory connectionFactory) {
+		DirectReplyToMessageListenerContainer container;
+		synchronized (this.directReplyToContainers) {
+			container = this.directReplyToContainers.get(connectionFactory);
+			if (container == null) {
+				container = new DirectReplyToMessageListenerContainer(connectionFactory);
+				container.setMessageListener(this);
+				container.setBeanName(this.beanName + "#" + this.containerInstance.getAndIncrement());
+				if (this.taskExecutor != null) {
+					container.setTaskExecutor(this.taskExecutor);
+				}
+				container.setNoLocal(this.noLocalReplyConsumer);
+				if (this.replyErrorHandler != null) {
+					container.setErrorHandler(this.replyErrorHandler);
+				}
+				container.start();
+				this.directReplyToContainers.put(connectionFactory, container);
+				this.replyAddress = Address.AMQ_RABBITMQ_REPLY_TO;
+			}
+		}
+		return container;
 	}
 
 	@Nullable
 	private Message doSendAndReceiveAsListener(final String exchange, final String routingKey, final Message message,
-			final CorrelationData correlationData, Channel channel) throws Exception { // NOSONAR
+			@Nullable final CorrelationData correlationData, Channel channel, boolean noCorrelation) throws Exception { // NOSONAR
+
 		final PendingReply pendingReply = new PendingReply();
-		String messageTag = String.valueOf(this.messageTagProvider.incrementAndGet());
+		String messageTag = null;
 		if (this.userCorrelationId) {
-			String correlationId;
 			if (this.correlationKey != null) {
-				correlationId = (String) message.getMessageProperties().getHeaders().get(this.correlationKey);
+				messageTag = (String) message.getMessageProperties().getHeaders().get(this.correlationKey);
 			}
 			else {
-				correlationId = message.getMessageProperties().getCorrelationId();
-			}
-			if (correlationId == null) {
-				this.replyHolder.put(messageTag, pendingReply);
-			}
-			else {
-				this.replyHolder.put(correlationId, pendingReply);
+				messageTag = message.getMessageProperties().getCorrelationId();
 			}
 		}
-		else {
-			this.replyHolder.put(messageTag, pendingReply);
+		if (messageTag == null) {
+			messageTag = String.valueOf(this.messageTagProvider.incrementAndGet());
 		}
 		saveAndSetProperties(message, pendingReply, messageTag);
+		this.replyHolder.put(messageTag, pendingReply);
+		if (noCorrelation) {
+			this.replyHolder.put(channel, pendingReply);
+		}
 
 		if (logger.isDebugEnabled()) {
 			logger.debug("Sending message with tag " + messageTag);
@@ -1965,6 +2039,9 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 		}
 		finally {
 			this.replyHolder.remove(messageTag);
+			if (noCorrelation) {
+				this.replyHolder.remove(channel);
+			}
 		}
 		return reply;
 	}
@@ -2003,12 +2080,12 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 
 	@Nullable
 	private Message exchangeMessages(final String exchange, final String routingKey, final Message message,
-			final CorrelationData correlationData, Channel channel, final PendingReply pendingReply, String messageTag)
-			throws IOException, InterruptedException {
+			@Nullable final CorrelationData correlationData, Channel channel, final PendingReply pendingReply,
+			String messageTag) throws IOException, InterruptedException {
 
 		Message reply;
 		boolean mandatory = isMandatoryFor(message);
-		if (mandatory && this.returnCallback == null) {
+		if (mandatory && this.returnsCallback == null) {
 			message.getMessageProperties().getHeaders().put(RETURN_CORRELATION_KEY, messageTag);
 		}
 		doSend(channel, exchange, routingKey, message, mandatory, correlationData);
@@ -2126,8 +2203,8 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 		}
 	}
 
-	private void cleanUpAfterAction(Channel channel, boolean invokeScope, RabbitResourceHolder resourceHolder,
-			Connection connection) {
+	private void cleanUpAfterAction(@Nullable Channel channel, boolean invokeScope,
+			@Nullable RabbitResourceHolder resourceHolder, @Nullable Connection connection) {
 
 		if (!invokeScope) {
 			if (resourceHolder != null) {
@@ -2144,12 +2221,10 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 	private <T> T invokeAction(ChannelCallback<T> action, ConnectionFactory connectionFactory, Channel channel)
 			throws Exception { // NOSONAR see the callback
 
-		if (this.confirmsOrReturnsCapable == null) {
-			determineConfirmsReturnsCapability(connectionFactory);
-		}
-		if (this.confirmsOrReturnsCapable) {
+		if (isPublisherConfirmsOrReturns(connectionFactory)) {
 			addListener(channel);
 		}
+
 		if (logger.isDebugEnabled()) {
 			logger.debug(
 					"Executing callback " + action.getClass().getSimpleName() + " on RabbitMQ Channel: " + channel);
@@ -2222,8 +2297,8 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 		return listener;
 	}
 
-	private void cleanUpAfterAction(RabbitResourceHolder resourceHolder, Connection connection, Channel channel,
-			ConfirmListener listener) {
+	private void cleanUpAfterAction(@Nullable RabbitResourceHolder resourceHolder, @Nullable Connection connection,
+			@Nullable Channel channel, @Nullable ConfirmListener listener) {
 
 		if (listener != null) {
 			channel.removeConfirmListener(listener);
@@ -2271,10 +2346,8 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 		}
 	}
 
-	public void determineConfirmsReturnsCapability(ConnectionFactory connectionFactory) {
-		this.publisherConfirms = connectionFactory.isPublisherConfirms();
-		this.confirmsOrReturnsCapable =
-				this.publisherConfirms || connectionFactory.isPublisherReturns();
+	private boolean isPublisherConfirmsOrReturns(ConnectionFactory connectionFactory) {
+		return connectionFactory.isPublisherConfirms() || connectionFactory.isPublisherReturns();
 	}
 
 	/**
@@ -2288,17 +2361,11 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 	 * @param correlationData The correlation data.
 	 * @throws IOException If thrown by RabbitMQ API methods.
 	 */
-	public void doSend(Channel channel, String exchangeArg, String routingKeyArg, Message message, // NOSONAR complexity
+	public void doSend(Channel channel, String exchangeArg, String routingKeyArg, Message message,
 			boolean mandatory, @Nullable CorrelationData correlationData) throws IOException {
 
-		String exch = exchangeArg;
-		String rKey = routingKeyArg;
-		if (exch == null) {
-			exch = this.exchange;
-		}
-		if (rKey == null) {
-			rKey = this.routingKey;
-		}
+		String exch = nullSafeExchange(exchangeArg);
+		String rKey = nullSafeRoutingKey(routingKeyArg);
 
 		if (logger.isTraceEnabled()) {
 			logger.trace("Original message to publish: " + message);
@@ -2311,7 +2378,7 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 		}
 		if (this.beforePublishPostProcessors != null) {
 			for (MessagePostProcessor processor : this.beforePublishPostProcessors) {
-				messageToUse = processor.postProcessMessage(messageToUse, correlationData);
+				messageToUse = processor.postProcessMessage(messageToUse, correlationData, exch, rKey);
 			}
 		}
 		setupConfirm(channel, messageToUse, correlationData);
@@ -2333,6 +2400,26 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 		}
 	}
 
+	/**
+	 * Return the exchange or the default exchange if null.
+	 * @param exchange the exchange.
+	 * @return the result.
+	 * @since 2.3.4
+	 */
+	public String nullSafeExchange(String exchange) {
+		return exchange == null ? this.exchange : exchange;
+	}
+
+	/**
+	 * Return the routing key or the default routing key if null.
+	 * @param rk the routing key.
+	 * @return the result.
+	 * @since 2.3.4
+	 */
+	public String nullSafeRoutingKey(String rk) {
+		return rk == null ? this.routingKey : rk;
+	}
+
 	protected void sendToRabbit(Channel channel, String exchange, String routingKey, boolean mandatory,
 			Message message) throws IOException {
 		BasicProperties convertedMessageProperties = this.messagePropertiesConverter
@@ -2341,19 +2428,27 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 	}
 
 	private void setupConfirm(Channel channel, Message message, @Nullable CorrelationData correlationDataArg) {
-		if ((this.publisherConfirms || this.confirmCallback != null) && channel instanceof PublisherCallbackChannel) {
+		final boolean publisherConfirms = channel instanceof ChannelProxy
+				&& ((ChannelProxy) channel).isPublisherConfirms();
 
-			PublisherCallbackChannel publisherCallbackChannel = (PublisherCallbackChannel) channel;
-			CorrelationData correlationData = this.correlationDataPostProcessor != null
-					? this.correlationDataPostProcessor.postProcess(message, correlationDataArg)
-					: correlationDataArg;
+		if ((publisherConfirms || this.confirmCallback != null)
+				&& channel instanceof PublisherCallbackChannel) {
 			long nextPublishSeqNo = channel.getNextPublishSeqNo();
-			message.getMessageProperties().setPublishSequenceNumber(nextPublishSeqNo);
-			publisherCallbackChannel.addPendingConfirm(this, nextPublishSeqNo,
-					new PendingConfirm(correlationData, System.currentTimeMillis()));
-			if (correlationData != null && StringUtils.hasText(correlationData.getId())) {
-				message.getMessageProperties().setHeader(PublisherCallbackChannel.RETURNED_MESSAGE_CORRELATION_KEY,
-						correlationData.getId());
+			if (nextPublishSeqNo > 0) {
+				PublisherCallbackChannel publisherCallbackChannel = (PublisherCallbackChannel) channel;
+				CorrelationData correlationData = this.correlationDataPostProcessor != null
+						? this.correlationDataPostProcessor.postProcess(message, correlationDataArg)
+						: correlationDataArg;
+				message.getMessageProperties().setPublishSequenceNumber(nextPublishSeqNo);
+				publisherCallbackChannel.addPendingConfirm(this, nextPublishSeqNo,
+						new PendingConfirm(correlationData, System.currentTimeMillis()));
+				if (correlationData != null && StringUtils.hasText(correlationData.getId())) {
+					message.getMessageProperties().setHeader(PublisherCallbackChannel.RETURNED_MESSAGE_CORRELATION_KEY,
+							correlationData.getId());
+				}
+			}
+			else {
+				logger.debug("Factory does not have confirms enabled");
 			}
 		}
 		else if (channel instanceof ChannelProxy && ((ChannelProxy) channel).isConfirmSelected()) {
@@ -2482,6 +2577,7 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 	}
 
 	@Override
+	@SuppressWarnings("deprecation")
 	public void handleReturn(int replyCode,
 			String replyText,
 			String exchange,
@@ -2489,16 +2585,20 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 			BasicProperties properties,
 			byte[] body) {
 
-		ReturnCallback callback = this.returnCallback;
+		handleReturn(new Return(replyCode, replyText, exchange, routingKey, properties, body));
+	}
+
+	@Override
+	public void handleReturn(Return returned) {
+		ReturnsCallback callback = this.returnsCallback;
 		if (callback == null) {
-			Object messageTagHeader = properties.getHeaders().remove(RETURN_CORRELATION_KEY);
+			Object messageTagHeader = returned.getProperties().getHeaders().remove(RETURN_CORRELATION_KEY);
 			if (messageTagHeader != null) {
 				String messageTag = messageTagHeader.toString();
 				final PendingReply pendingReply = this.replyHolder.get(messageTag);
 				if (pendingReply != null) {
-					callback = (message, replyCode1, replyText1, exchange1, routingKey1) ->
-							pendingReply.returned(new AmqpMessageReturnedException("Message returned",
-									message, replyCode1, replyText1, exchange1, routingKey1));
+					callback = (returnedMsg) ->
+							pendingReply.returned(new AmqpMessageReturnedException("Message returned", returnedMsg));
 				}
 				else if (logger.isWarnEnabled()) {
 					logger.warn("Returned request message but caller has timed out");
@@ -2509,12 +2609,12 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 			}
 		}
 		if (callback != null) {
-			properties.getHeaders().remove(PublisherCallbackChannel.RETURN_LISTENER_CORRELATION_KEY);
+			returned.getProperties().getHeaders().remove(PublisherCallbackChannel.RETURN_LISTENER_CORRELATION_KEY);
 			MessageProperties messageProperties = this.messagePropertiesConverter.toMessageProperties(
-					properties, null, this.encoding);
-			Message returnedMessage = new Message(body, messageProperties);
-			callback.returnedMessage(returnedMessage,
-					replyCode, replyText, exchange, routingKey);
+					returned.getProperties(), null, this.encoding);
+			Message returnedMessage = new Message(returned.getBody(), messageProperties);
+			callback.returnedMessage(new ReturnedMessage(returnedMessage, returned.getReplyCode(),
+					returned.getReplyText(), returned.getExchange(), returned.getRoutingKey()));
 		}
 	}
 
@@ -2543,17 +2643,20 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 	}
 
 	@Override
-	public void onMessage(Message message) {
+	public void onMessage(Message message, @Nullable Channel channel) {
 		if (logger.isTraceEnabled()) {
 			logger.trace("Message received " + message);
 		}
-		String messageTag;
+		Object messageTag;
 		if (this.correlationKey == null) { // using standard correlationId property
 			messageTag = message.getMessageProperties().getCorrelationId();
 		}
 		else {
-			messageTag = (String) message.getMessageProperties()
+			messageTag = message.getMessageProperties()
 					.getHeaders().get(this.correlationKey);
+		}
+		if (this.useChannelForCorrelation && channel != null && this.replyHolder.containsKey(channel)) {
+			messageTag = channel;
 		}
 		if (messageTag == null) {
 			throw new AmqpRejectAndDontRequeueException("No correlation header in reply");
@@ -2570,6 +2673,17 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 			restoreProperties(message, pendingReply);
 			pendingReply.reply(message);
 		}
+	}
+
+	/**
+	 * {@inheritDoc}
+	 *
+	 * @deprecated - use {@link #onMessage(Message, Channel)}.
+	 */
+	@Deprecated
+	@Override
+	public void onMessage(Message message) {
+		onMessage(message, null);
 	}
 
 	private void restoreProperties(Message message, PendingReply pendingReply) {
@@ -2629,6 +2743,7 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 			future.completeExceptionally(
 					new ConsumeOkNotReceivedException("Blocking receive, consumer failed to consume within "
 							+ timeoutMillis + " ms: " + consumer));
+			RabbitUtils.setPhysicalCloseRequired(channel, true);
 		}
 		return consumer;
 	}
@@ -2734,7 +2849,10 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 	/**
 	 * A callback for returned messages.
 	 *
+	 * @deprecated in favor of {@link #returnedMessage(ReturnedMessage)} which is
+	 * easier to use with lambdas.
 	 */
+	@Deprecated
 	@FunctionalInterface
 	public interface ReturnCallback {
 
@@ -2748,6 +2866,62 @@ public class RabbitTemplate extends RabbitAccessor // NOSONAR type line count
 		 */
 		void returnedMessage(Message message, int replyCode, String replyText, String exchange, String routingKey);
 
+		/**
+		 * Returned message callback.
+		 * @param returned the returned message and metadata.
+		 */
+		@SuppressWarnings("deprecation")
+		default void returnedMessage(ReturnedMessage returned) {
+			returnedMessage(returned.getMessage(), returned.getReplyCode(), returned.getReplyText(),
+					returned.getExchange(), returned.getRoutingKey());
+		}
+
 	}
 
+	/**
+	 * A callback for returned messages.
+	 *
+	 * @since 2.3
+	 */
+	@FunctionalInterface
+	public interface ReturnsCallback extends ReturnCallback {
+
+		/**
+		 * Returned message callback.
+		 * @param message the returned message.
+		 * @param replyCode the reply code.
+		 * @param replyText the reply text.
+		 * @param exchange the exchange.
+		 * @param routingKey the routing key.
+		 * @deprecated in favor of {@link #returnedMessage(ReturnedMessage)} which is
+		 * easier to use with lambdas.
+		 */
+		@Override
+		@Deprecated
+		default void returnedMessage(Message message, int replyCode, String replyText, String exchange,
+				String routingKey) {
+
+			throw new UnsupportedOperationException(
+					"This should never be called, please open a GitHub issue with a stack trace");
+		};
+
+		/**
+		 * Returned message callback.
+		 * @param returned the returned message and metadata.
+		 */
+		@Override
+		void returnedMessage(ReturnedMessage returned);
+
+		/**
+		 * Internal use only; transitional during deprecation.
+		 * @return the legacy delegate.
+		 * @deprecated - will be removed with {@link ReturnCallback}.
+		 */
+		@Deprecated
+		@Nullable
+		default ReturnCallback delegate() {
+			return null;
+		}
+
+	}
 }

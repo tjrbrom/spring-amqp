@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package org.springframework.amqp.rabbit.connection;
 
 import java.io.IOException;
+import java.util.function.Consumer;
 
 import org.springframework.amqp.AmqpIOException;
 import org.springframework.lang.Nullable;
@@ -41,6 +42,10 @@ import com.rabbitmq.client.Channel;
  * @author Artem Bilan
  */
 public final class ConnectionFactoryUtils {
+
+	private static final ThreadLocal<AfterCompletionFailedException> COMPLETION_EXCEPTIONS = new ThreadLocal<>();
+
+	private static boolean captureAfterCompletionExceptions;
 
 	private ConnectionFactoryUtils() {
 	}
@@ -147,7 +152,8 @@ public final class ConnectionFactoryUtils {
 			}
 			resourceHolderToUse.addChannel(channel, connection);
 
-			if (!resourceHolderToUse.equals(resourceHolder)) {
+			if (!resourceHolderToUse.equals(resourceHolder)
+					&& TransactionSynchronizationManager.isSynchronizationActive()) {
 				bindResourceToTransaction(resourceHolderToUse, connectionFactory,
 						resourceFactory.isSynchedLocalTransactionAllowed());
 			}
@@ -171,6 +177,7 @@ public final class ConnectionFactoryUtils {
 
 	public static RabbitResourceHolder bindResourceToTransaction(RabbitResourceHolder resourceHolder,
 			ConnectionFactory connectionFactory, boolean synched) {
+
 		if (TransactionSynchronizationManager.hasResource(connectionFactory)
 				|| !TransactionSynchronizationManager.isActualTransactionActive() || !synched) {
 			return (RabbitResourceHolder) TransactionSynchronizationManager.getResource(connectionFactory); // NOSONAR never null
@@ -179,9 +186,40 @@ public final class ConnectionFactoryUtils {
 		resourceHolder.setSynchronizedWithTransaction(true);
 		if (TransactionSynchronizationManager.isSynchronizationActive()) {
 			TransactionSynchronizationManager.registerSynchronization(new RabbitResourceSynchronization(resourceHolder,
-					connectionFactory));
+					connectionFactory, ConnectionFactoryUtils::completionFailed));
 		}
 		return resourceHolder;
+	}
+
+	private static void completionFailed(AfterCompletionFailedException ex) {
+		if (captureAfterCompletionExceptions) {
+			COMPLETION_EXCEPTIONS.set(ex);
+		}
+	}
+
+	/**
+	 * Call this method to enable capturing {@link AfterCompletionFailedException}s
+	 * when using transaction synchronization. Exceptions are stored in a {@link ThreadLocal}
+	 * which must be cleared by calling {@link #checkAfterCompletion()} after the transaction
+	 * has completed.
+	 * @param enable true to enable capture.
+	 */
+	public static void enableAfterCompletionFailureCapture(boolean enable) {
+		captureAfterCompletionExceptions = enable;
+	}
+
+	/**
+	 * When using transaction synchronization, call this method after the transaction commits to
+	 * verify that the RabbitMQ transaction committed.
+	 * @throws AfterCompletionFailedException if synchronization failed.
+	 * @since 2.3.10
+	 */
+	public static void checkAfterCompletion() {
+		AfterCompletionFailedException ex = COMPLETION_EXCEPTIONS.get();
+		if (ex != null) {
+			COMPLETION_EXCEPTIONS.remove();
+			throw ex;
+		}
 	}
 
 	public static void registerDeliveryTag(ConnectionFactory connectionFactory, Channel channel, Long tag) {
@@ -316,9 +354,14 @@ public final class ConnectionFactoryUtils {
 
 		private final RabbitResourceHolder resourceHolder;
 
-		RabbitResourceSynchronization(RabbitResourceHolder resourceHolder, Object resourceKey) {
+		private final Consumer<AfterCompletionFailedException> afterCompletionCallback;
+
+		RabbitResourceSynchronization(RabbitResourceHolder resourceHolder, Object resourceKey,
+				Consumer<AfterCompletionFailedException> afterCompletionCallback) {
+
 			super(resourceHolder, resourceKey);
 			this.resourceHolder = resourceHolder;
+			this.afterCompletionCallback = afterCompletionCallback;
 		}
 
 		@Override
@@ -328,17 +371,23 @@ public final class ConnectionFactoryUtils {
 
 		@Override
 		public void afterCompletion(int status) {
-			if (status == TransactionSynchronization.STATUS_COMMITTED) {
-				this.resourceHolder.commitAll();
+			try {
+				if (status == TransactionSynchronization.STATUS_COMMITTED) {
+					this.resourceHolder.commitAll();
+				}
+				else {
+					this.resourceHolder.rollbackAll();
+				}
 			}
-			else {
-				this.resourceHolder.rollbackAll();
+			catch (RuntimeException ex) {
+				this.afterCompletionCallback.accept(new AfterCompletionFailedException(status, ex));
 			}
-
-			if (this.resourceHolder.isReleaseAfterCompletion()) {
-				this.resourceHolder.setSynchronizedWithTransaction(false);
+			finally {
+				if (this.resourceHolder.isReleaseAfterCompletion()) {
+					this.resourceHolder.setSynchronizedWithTransaction(false);
+				}
+				super.afterCompletion(status);
 			}
-			super.afterCompletion(status);
 		}
 
 		@Override

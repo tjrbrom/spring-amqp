@@ -1,12 +1,12 @@
 [[whats-new]]
 == What's New
 
-=== Changes in 2.3 Since 2.2
+=== Changes in 3.0 Since 2.4
 
-This section describes the changes between version 2.2 and version 2.3.
-See <<change-history>> for changes in previous versions.
+==== Java 17, Spring Framework 6.0
 
-==== Testing Changes
+This version requires Spring Framework 6.0 and Java 17
 
-A new annotation `@SpringRabbitTest` is provided to automatically configure some infrastructure beans for when you are not using `SpringBootTest`.
-See <<spring-rabbit-test>> for more information.
+==== Remoting
+
+The remoting feature (using RMI) is no longer supported.

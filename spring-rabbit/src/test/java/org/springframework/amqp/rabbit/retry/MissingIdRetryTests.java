@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package org.springframework.amqp.rabbit.retry;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atMost;
@@ -57,11 +58,12 @@ import org.springframework.retry.RetryContext;
 import org.springframework.retry.policy.MapRetryContextCache;
 import org.springframework.retry.policy.RetryContextCache;
 import org.springframework.retry.policy.SimpleRetryPolicy;
+import org.springframework.retry.support.RetrySynchronizationManager;
 import org.springframework.retry.support.RetryTemplate;
 
 /**
  * @author Gary Russell
- * @author Arnaud Cogolu?gnes
+ * @author Arnaud Cogoluègnes
  * @since 1.1.2
  *
  */
@@ -82,7 +84,7 @@ public class MissingIdRetryTests {
 		RabbitAvailableCondition.getBrokerRunning().deleteExchanges("retry.test.exchange");
 	}
 
-	@SuppressWarnings({ "rawtypes", "unchecked" })
+	@SuppressWarnings("rawtypes")
 	@Test
 	public void testWithNoId() throws Exception {
 		// 2 messages; each retried once by missing id interceptor
@@ -112,13 +114,9 @@ public class MissingIdRetryTests {
 		try {
 			assertThat(latch.await(30, TimeUnit.SECONDS)).isTrue();
 			Map map = (Map) new DirectFieldAccessor(cache).getPropertyValue("map");
-			int n = 0;
-			while (n++ < 100 && map.size() != 0) {
-				Thread.sleep(100);
-			}
+			await().until(() -> map.size() == 0);
 			verify(cache, never()).put(any(), any(RetryContext.class));
 			verify(cache, never()).remove(any());
-			assertThat(map).as("Expected map.size() = 0, was: " + map.size()).hasSize(0);
 		}
 		finally {
 			container.stop();
@@ -146,7 +144,8 @@ public class MissingIdRetryTests {
 		RetryContextCache cache = spy(new MapRetryContextCache());
 		retryTemplate.setRetryContextCache(cache);
 		fb.setRetryOperations(retryTemplate);
-		fb.setMessageRecoverer(new RejectAndDontRequeueRecoverer());
+		fb.setMessageRecoverer(new RejectAndDontRequeueRecoverer(() ->
+			"Don't requeue after " + RetrySynchronizationManager.getContext().getRetryCount() + " attempts"));
 
 		Advice retryInterceptor = fb.getObject();
 		container.setAdviceChain(retryInterceptor);
@@ -161,10 +160,7 @@ public class MissingIdRetryTests {
 		try {
 			assertThat(latch.await(30, TimeUnit.SECONDS)).isTrue();
 			Map map = (Map) new DirectFieldAccessor(cache).getPropertyValue("map");
-			int n = 0;
-			while (n++ < 100 && map.size() != 0) {
-				Thread.sleep(100);
-			}
+			await().until(() -> map.size() == 0);
 			ArgumentCaptor putCaptor = ArgumentCaptor.forClass(Object.class);
 			ArgumentCaptor getCaptor = ArgumentCaptor.forClass(Object.class);
 			ArgumentCaptor removeCaptor = ArgumentCaptor.forClass(Object.class);
@@ -175,7 +171,6 @@ public class MissingIdRetryTests {
 			logger.debug("puts:" + putCaptor.getAllValues());
 			logger.debug("gets:" + putCaptor.getAllValues());
 			logger.debug("removes:" + removeCaptor.getAllValues());
-			assertThat(map).as("Expected map.size() = 0, was: " + map.size()).hasSize(0);
 		}
 		finally {
 			container.stop();
@@ -226,10 +221,7 @@ public class MissingIdRetryTests {
 		try {
 			assertThat(cdl.await(30, TimeUnit.SECONDS)).isTrue();
 			Map map = (Map) new DirectFieldAccessor(cache).getPropertyValue("map");
-			int n = 0;
-			while (n++ < 100 && map.size() != 0) {
-				Thread.sleep(100);
-			}
+			await().until(() -> map.size() == 0);
 			ArgumentCaptor putCaptor = ArgumentCaptor.forClass(Object.class);
 			ArgumentCaptor getCaptor = ArgumentCaptor.forClass(Object.class);
 			ArgumentCaptor removeCaptor = ArgumentCaptor.forClass(Object.class);
@@ -240,7 +232,6 @@ public class MissingIdRetryTests {
 			logger.debug("puts:" + putCaptor.getAllValues());
 			logger.debug("gets:" + putCaptor.getAllValues());
 			logger.debug("removes:" + removeCaptor.getAllValues());
-			assertThat(map).as("Expected map.size() = 0, was: " + map.size()).hasSize(0);
 		}
 		finally {
 			container.stop();

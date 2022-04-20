@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2020 the original author or authors.
+ * Copyright 2014-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,9 +30,7 @@ import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.rabbit.batch.BatchingStrategy;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.listener.AbstractMessageListenerContainer;
-import org.springframework.amqp.rabbit.listener.RabbitListenerContainerFactory;
 import org.springframework.amqp.rabbit.listener.RabbitListenerEndpoint;
-import org.springframework.amqp.rabbit.listener.adapter.AbstractAdaptableMessageListener;
 import org.springframework.amqp.support.ConsumerTagStrategy;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.amqp.utils.JavaUtils;
@@ -42,8 +40,6 @@ import org.springframework.context.ApplicationContextAware;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.ApplicationEventPublisherAware;
 import org.springframework.lang.Nullable;
-import org.springframework.retry.RecoveryCallback;
-import org.springframework.retry.support.RetryTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.util.Assert;
 import org.springframework.util.ErrorHandler;
@@ -51,7 +47,8 @@ import org.springframework.util.backoff.BackOff;
 import org.springframework.util.backoff.FixedBackOff;
 
 /**
- * Base {@link RabbitListenerContainerFactory} for Spring's base container implementation.
+ * {@link org.springframework.amqp.rabbit.listener.RabbitListenerContainerFactory}
+ * for Spring's base container implementation.
  * @param <C> the container type.
  *
  * @author Stephane Nicoll
@@ -64,7 +61,8 @@ import org.springframework.util.backoff.FixedBackOff;
  * @see AbstractMessageListenerContainer
  */
 public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractMessageListenerContainer>
-		implements RabbitListenerContainerFactory<C>, ApplicationContextAware, ApplicationEventPublisherAware {
+		extends BaseRabbitListenerContainerFactory<C>
+		implements ApplicationContextAware, ApplicationEventPublisherAware {
 
 	protected final Log logger = LogFactory.getLog(getClass()); // NOSONAR
 
@@ -86,7 +84,7 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 
 	private Integer prefetchCount;
 
-	private Boolean defaultRequeueRejected;
+	private Boolean globalQos;
 
 	private Advice[] adviceChain;
 
@@ -111,12 +109,6 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 	private Integer phase;
 
 	private MessagePostProcessor[] afterReceivePostProcessors;
-
-	private MessagePostProcessor[] beforeSendReplyPostProcessors;
-
-	private RetryTemplate retryTemplate;
-
-	private RecoveryCallback<?> recoveryCallback;
 
 	private ContainerCustomizer<C> containerCustomizer;
 
@@ -188,14 +180,6 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 	 */
 	public void setPrefetchCount(Integer prefetch) {
 		this.prefetchCount = prefetch;
-	}
-
-	/**
-	 * @param requeueRejected true to reject by default.
-	 * @see AbstractMessageListenerContainer#setDefaultRequeueRejected
-	 */
-	public void setDefaultRequeueRejected(Boolean requeueRejected) {
-		this.defaultRequeueRejected = requeueRejected;
 	}
 
 	/**
@@ -308,44 +292,6 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 	}
 
 	/**
-	 * Set post processors that will be applied before sending replies; added to each
-	 * message listener adapter.
-	 * @param postProcessors the post processors.
-	 * @since 2.0.3
-	 * @see AbstractAdaptableMessageListener#setBeforeSendReplyPostProcessors(MessagePostProcessor...)
-	 */
-	public void setBeforeSendReplyPostProcessors(MessagePostProcessor... postProcessors) {
-		Assert.notNull(postProcessors, "'postProcessors' cannot be null");
-		Assert.noNullElements(postProcessors, "'postProcessors' cannot have null elements");
-		this.beforeSendReplyPostProcessors = Arrays.copyOf(postProcessors, postProcessors.length);
-	}
-
-	/**
-	 * Set a {@link RetryTemplate} to use when sending replies; added to each message
-	 * listener adapter.
-	 * @param retryTemplate the template.
-	 * @since 2.0.6
-	 * @see #setReplyRecoveryCallback(RecoveryCallback)
-	 * @see AbstractAdaptableMessageListener#setRetryTemplate(RetryTemplate)
-	 */
-	public void setRetryTemplate(RetryTemplate retryTemplate) {
-		this.retryTemplate = retryTemplate;
-	}
-
-	/**
-	 * Set a {@link RecoveryCallback} to invoke when retries are exhausted. Added to each
-	 * message listener adapter. Only used if a {@link #setRetryTemplate(RetryTemplate)
-	 * retryTemplate} is provided.
-	 * @param recoveryCallback the recovery callback.
-	 * @since 2.0.6
-	 * @see #setRetryTemplate(RetryTemplate)
-	 * @see AbstractAdaptableMessageListener#setRecoveryCallback(RecoveryCallback)
-	 */
-	public void setReplyRecoveryCallback(RecoveryCallback<?> recoveryCallback) {
-		this.recoveryCallback = recoveryCallback;
-	}
-
-	/**
 	 * Set a {@link ContainerCustomizer} that is invoked after a container is created and
 	 * configured to enable further customization of the container.
 	 * @param containerCustomizer the customizer.
@@ -387,6 +333,16 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 		this.deBatchingEnabled = deBatchingEnabled;
 	}
 
+	/**
+	 * Apply prefetch to the entire channel.
+	 * @param globalQos true for a channel-wide prefetch.
+	 * @since 2.2.17
+	 * @see com.rabbitmq.client.Channel#basicQos(int, boolean)
+	 */
+	public void setGlobalQos(boolean globalQos) {
+		this.globalQos = globalQos;
+	}
+
 	@Override
 	public C createListenerContainer(RabbitListenerEndpoint endpoint) {
 		C instance = createContainerInstance();
@@ -395,7 +351,7 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 				JavaUtils.INSTANCE
 						.acceptIfNotNull(this.connectionFactory, instance::setConnectionFactory)
 						.acceptIfNotNull(this.errorHandler, instance::setErrorHandler);
-		if (this.messageConverter != null && endpoint != null) {
+		if (this.messageConverter != null && endpoint != null && endpoint.getMessageConverter() == null) {
 			endpoint.setMessageConverter(this.messageConverter);
 		}
 		javaUtils
@@ -405,7 +361,8 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 			.acceptIfNotNull(this.taskExecutor, instance::setTaskExecutor)
 			.acceptIfNotNull(this.transactionManager, instance::setTransactionManager)
 			.acceptIfNotNull(this.prefetchCount, instance::setPrefetchCount)
-			.acceptIfNotNull(this.defaultRequeueRejected, instance::setDefaultRequeueRejected)
+			.acceptIfNotNull(this.globalQos, instance::setGlobalQos)
+			.acceptIfNotNull(getDefaultRequeueRejected(), instance::setDefaultRequeueRejected)
 			.acceptIfNotNull(this.adviceChain, instance::setAdviceChain)
 			.acceptIfNotNull(this.recoveryBackOff, instance::setRecoveryBackOff)
 			.acceptIfNotNull(this.mismatchedQueuesFatal, instance::setMismatchedQueuesFatal)
@@ -424,27 +381,14 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 		}
 		if (endpoint != null) { // endpoint settings overriding default factory settings
 			javaUtils
-				.acceptIfNotNull(endpoint.getAutoStartup(), instance::setAutoStartup)
 				.acceptIfNotNull(endpoint.getTaskExecutor(), instance::setTaskExecutor)
-				.acceptIfNotNull(endpoint.getAckMode(), instance::setAcknowledgeMode);
-			javaUtils
+				.acceptIfNotNull(endpoint.getAckMode(), instance::setAcknowledgeMode)
 				.acceptIfNotNull(this.batchingStrategy, endpoint::setBatchingStrategy);
 			instance.setListenerId(endpoint.getId());
 			endpoint.setBatchListener(this.batchListener);
-			endpoint.setupListenerContainer(instance);
 		}
-		if (instance.getMessageListener() instanceof AbstractAdaptableMessageListener) {
-			AbstractAdaptableMessageListener messageListener = (AbstractAdaptableMessageListener) instance
-					.getMessageListener();
-			javaUtils
-					.acceptIfNotNull(this.beforeSendReplyPostProcessors,
-							messageListener::setBeforeSendReplyPostProcessors)
-					.acceptIfNotNull(this.retryTemplate, messageListener::setRetryTemplate)
-					.acceptIfCondition(this.retryTemplate != null && this.recoveryCallback != null,
-							this.recoveryCallback, messageListener::setRecoveryCallback)
-					.acceptIfNotNull(this.defaultRequeueRejected, messageListener::setDefaultRequeueRejected)
-					.acceptIfNotNull(endpoint.getReplyPostProcessor(), messageListener::setReplyPostProcessor);
-		}
+		applyCommonOverrides(endpoint, instance);
+
 		initializeContainer(instance, endpoint);
 
 		if (this.containerCustomizer != null) {

@@ -728,10 +728,23 @@
 		<xsd:attribute name="prefetch" type="xsd:string">
 			<xsd:annotation>
 				<xsd:documentation><![CDATA[
-	Tells the broker how many messages to send to each consumer in a single request. Often this can be set quite high
-	to improve throughput. It should be greater than or equal to the transaction size.
+	Tells the broker how many messages to send to each consumer (or channel) in a single request.
+	Often this can be set quite high
+	to improve throughput, but it can cause starvation when you have multiple application instances
+	and low message volume.
+	It should be greater than or equal to the batch size. Also see 'global-qos'.
 				]]></xsd:documentation>
 			</xsd:annotation>
+		</xsd:attribute>
+		<xsd:attribute name="global-qos">
+			<xsd:annotation>
+				<xsd:documentation><![CDATA[
+	When true, apply the 'prefetch' globally to the channel rather than to each consumer on the channel.
+				]]></xsd:documentation>
+			</xsd:annotation>
+			<xsd:simpleType>
+				<xsd:union memberTypes="xsd:boolean xsd:string" />
+			</xsd:simpleType>
 		</xsd:attribute>
 		<xsd:attribute name="transaction-size" type="xsd:string">
 			<xsd:annotation>
@@ -1272,7 +1285,7 @@
 				<xsd:annotation>
 					<xsd:documentation><![CDATA[
 	When 'true' sets the mandatory flag on basic.publish; only applies if
-	a 'return-callback' is provided. Mutually exclusive with 'mandatory-expression'.
+	a 'returns-callback' is provided. Mutually exclusive with 'mandatory-expression'.
 	Defaults to 'false'.
 					]]></xsd:documentation>
 				</xsd:annotation>
@@ -1286,7 +1299,7 @@
 	A SpEL expression to be evaluated against each request message to determine a 'mandatory' boolean value.
 	The BeanFactoryResolver is available too, if the RabbitTemplate is used from Spring Context,
 	allowing for expressions such as '@myBean.isMandatory(#root)`.
-	Only applies if a 'return-callback' is provided. Mutually exclusive with 'mandatory'.
+	Only applies if a 'returns-callback' is provided. Mutually exclusive with 'mandatory'.
 					]]></xsd:documentation>
 				</xsd:annotation>
 			</xsd:attribute>
@@ -1296,10 +1309,26 @@
 	A reference to an implementation of RabbitTemplate.ReturnCallback - invoked if
 	a return is received for a message published with mandatory set
 	that couldn't be delivered according to the semantics of that option.
+	DEPRECTATED - use 'returns-callback' instead.
 					]]></xsd:documentation>
 					<xsd:appinfo>
 						<tool:annotation kind="ref">
-							<tool:expected-type type="org.springframework.amqp.core.RabbitTemplate.ReturnCallback" />
+							<tool:expected-type type="org.springframework.amqp.core.RabbitTemplate.ReturnCallback"/>
+						</tool:annotation>
+					</xsd:appinfo>
+				</xsd:annotation>
+			</xsd:attribute>
+			<xsd:attribute name="returns-callback" type="xsd:string" use="optional">
+				<xsd:annotation>
+					<xsd:documentation><![CDATA[
+	A reference to an implementation of RabbitTemplate.ReturnsCallback - invoked if
+	a return is received for a message published with mandatory set
+	that couldn't be delivered according to the semantics of that option.
+	Replaces the deprecated 'return-callback'.
+					]]></xsd:documentation>
+					<xsd:appinfo>
+						<tool:annotation kind="ref">
+							<tool:expected-type type="org.springframework.amqp.core.RabbitTemplate.ReturnsCallback"/>
 						</tool:annotation>
 					</xsd:appinfo>
 				</xsd:annotation>
@@ -1313,7 +1342,7 @@
 					]]></xsd:documentation>
 					<xsd:appinfo>
 						<tool:annotation kind="ref">
-							<tool:expected-type type="org.springframework.amqp.core.RabbitTemplate.ConfirmCallback" />
+							<tool:expected-type type="org.springframework.amqp.core.RabbitTemplate.ConfirmCallback"/>
 						</tool:annotation>
 					</xsd:appinfo>
 				</xsd:annotation>
@@ -1417,7 +1446,7 @@
 				<xsd:annotation>
 					<xsd:documentation><![CDATA[
 	List of addresses; e.g. host1,host2:4567,host3 - overrides host/port if supplied.
-	Connection will be attempted in order unless 'shuffle-addresses' is 'true'.
+	Connection will be attempted in order unless 'address-shuffle-mode' is set to other than 'NONE'.
 					]]></xsd:documentation>
 				</xsd:annotation>
 			</xsd:attribute>
@@ -1425,7 +1454,33 @@
 				<xsd:annotation>
 					<xsd:documentation><![CDATA[
 	Set to true when 'addresses' has more than one address to shuffle the list into a random order.
+	DEPRECATED: use 'address-shuffle-mode' instead.
 					]]></xsd:documentation>
+				</xsd:annotation>
+			</xsd:attribute>
+			<xsd:attribute name="address-shuffle-mode" use="optional">
+				<xsd:annotation>
+					<xsd:documentation><![CDATA[
+	When multiple addresses are provided, determines whether or not the addresses are shuffled before
+	or after creating a connection. NONE means no shuffling is performed. RANDOM means that the
+	addresses are randomly shuffled before each connection is created. INORDER means that the first
+	address is moved to the end after each connection is created.
+					]]></xsd:documentation>
+				</xsd:annotation>
+				<xsd:simpleType>
+					<xsd:union memberTypes="shuffleModes xsd:string"/>
+				</xsd:simpleType>
+			</xsd:attribute>
+			<xsd:attribute name="address-resolver" type="xsd:string" use="optional">
+				<xsd:annotation>
+					<xsd:documentation><![CDATA[
+	An address resolver bean; overrides 'addresses' and 'host/port'.
+					]]></xsd:documentation>
+					<xsd:appinfo>
+						<tool:annotation kind="ref">
+							<tool:expected-type type="com.rabbitmq.client.AddressResolver" />
+						</tool:annotation>
+					</xsd:appinfo>
 				</xsd:annotation>
 			</xsd:attribute>
 			<xsd:attribute name="username" type="xsd:string" use="optional">
@@ -1627,6 +1682,14 @@
 		<xsd:restriction base="xsd:token">
 			<xsd:enumeration value="CHANNEL"/>
 			<xsd:enumeration value="CONNECTION"/>
+		</xsd:restriction>
+	</xsd:simpleType>
+
+	<xsd:simpleType name="shuffleModes">
+		<xsd:restriction base="xsd:token">
+			<xsd:enumeration value="NONE"/>
+			<xsd:enumeration value="RANDOM"/>
+			<xsd:enumeration value="INORDER"/>
 		</xsd:restriction>
 	</xsd:simpleType>
 

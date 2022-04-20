@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2020 the original author or authors.
+ * Copyright 2014-2022 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,8 @@ package org.springframework.amqp.rabbit.annotation;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
-import static org.mockito.Mockito.doAnswer;
+import static org.awaitility.Awaitility.await;
+import static org.mockito.BDDMockito.willAnswer;
 import static org.mockito.Mockito.mock;
 
 import java.io.IOException;
@@ -41,6 +42,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import javax.validation.Valid;
+
 import org.aopalliance.aop.Advice;
 import org.aopalliance.intercept.MethodInterceptor;
 import org.aopalliance.intercept.MethodInvocation;
@@ -57,6 +60,7 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.core.MessagePropertiesBuilder;
+import org.springframework.amqp.core.QueueBuilder;
 import org.springframework.amqp.rabbit.config.DirectRabbitListenerContainerFactory;
 import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory;
 import org.springframework.amqp.rabbit.config.SimpleRabbitListenerEndpoint;
@@ -71,6 +75,7 @@ import org.springframework.amqp.rabbit.junit.BrokerRunningSupport;
 import org.springframework.amqp.rabbit.junit.LogLevels;
 import org.springframework.amqp.rabbit.junit.RabbitAvailable;
 import org.springframework.amqp.rabbit.junit.RabbitAvailableCondition;
+import org.springframework.amqp.rabbit.listener.AbstractMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.ConditionalRejectingErrorHandler;
 import org.springframework.amqp.rabbit.listener.DirectMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.MessageListenerContainer;
@@ -106,6 +111,7 @@ import org.springframework.context.annotation.AnnotationConfigApplicationContext
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Scope;
+import org.springframework.core.MethodParameter;
 import org.springframework.core.Ordered;
 import org.springframework.core.PriorityOrdered;
 import org.springframework.core.convert.ConversionService;
@@ -114,11 +120,14 @@ import org.springframework.core.convert.support.DefaultConversionService;
 import org.springframework.core.task.TaskExecutor;
 import org.springframework.data.web.JsonPath;
 import org.springframework.lang.NonNull;
+import org.springframework.messaging.MessageHeaders;
 import org.springframework.messaging.converter.GenericMessageConverter;
 import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.messaging.handler.annotation.SendTo;
 import org.springframework.messaging.handler.annotation.support.DefaultMessageHandlerMethodFactory;
+import org.springframework.messaging.handler.annotation.support.MethodArgumentNotValidException;
+import org.springframework.messaging.handler.invocation.HandlerMethodArgumentResolver;
 import org.springframework.messaging.support.GenericMessage;
 import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.retry.support.RetryTemplate;
@@ -130,6 +139,9 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.EnableTransactionManagement;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.ErrorHandler;
+import org.springframework.validation.Errors;
+import org.springframework.validation.Validator;
+import org.springframework.validation.annotation.Validated;
 
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.http.client.Client;
@@ -165,7 +177,8 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 		"test.simple.direct2", "test.generic.list", "test.generic.map",
 		"amqp656dlq", "test.simple.declare", "test.return.exceptions", "test.pojo.errors", "test.pojo.errors2",
 		"test.messaging.message", "test.amqp.message", "test.bytes.to.string", "test.projection",
-		"manual.acks.1", "manual.acks.2", "erit.batch.1", "erit.batch.2", "erit.batch.3" },
+		"test.custom.argument", "test.arg.validation",
+		"manual.acks.1", "manual.acks.2", "erit.batch.1", "erit.batch.2", "erit.batch.3", "erit.mp.arg" },
 		purgeAfterEach = false)
 public class EnableRabbitIntegrationTests {
 
@@ -179,7 +192,10 @@ public class EnableRabbitIntegrationTests {
 	private RabbitAdmin rabbitAdmin;
 
 	@Autowired
-	private CountDownLatch errorHandlerLatch;
+	private CountDownLatch errorHandlerLatch1;
+
+	@Autowired
+	private CountDownLatch errorHandlerLatch2;
 
 	@Autowired
 	private AtomicReference<Throwable> errorHandlerError;
@@ -220,10 +236,26 @@ public class EnableRabbitIntegrationTests {
 	@Autowired
 	private MultiListenerBean multi;
 
+	@Autowired
+	private MultiListenerValidatedJsonBean multiValidated;
+
 	@BeforeAll
 	public static void setUp() {
 		System.setProperty(RabbitListenerAnnotationBeanPostProcessor.RABBIT_EMPTY_STRING_ARGUMENTS_PROPERTY,
 				"test-empty");
+		RabbitAvailableCondition.getBrokerRunning().removeExchanges("auto.exch.tx",
+				"auto.exch",
+				"auto.exch.fanout",
+				"auto.exch",
+				"auto.exch",
+				"auto.start",
+				"auto.headers",
+				"auto.headers",
+				"auto.internal",
+				"multi.exch",
+				"multi.json.exch",
+				"multi.exch.tx",
+				"test.metaFanout");
 	}
 
 	@AfterAll
@@ -259,7 +291,6 @@ public class EnableRabbitIntegrationTests {
 		assertThat(AopUtils.isJdkDynamicProxy(this.txService)).isTrue();
 		Baz baz = new Baz();
 		baz.field = "baz";
-		rabbitTemplate.setReplyTimeout(600000);
 		assertThat(rabbitTemplate.convertSendAndReceive("auto.exch.tx", "auto.rk.tx", baz)).isEqualTo("BAZ: baz: auto.rk.tx");
 	}
 
@@ -483,7 +514,7 @@ public class EnableRabbitIntegrationTests {
 	public void testInvalidPojoConversion() throws InterruptedException {
 		this.rabbitTemplate.convertAndSend("test.invalidPojo", "bar");
 
-		assertThat(this.errorHandlerLatch.await(10, TimeUnit.SECONDS)).isTrue();
+		assertThat(this.errorHandlerLatch1.await(10, TimeUnit.SECONDS)).isTrue();
 		Throwable throwable = this.errorHandlerError.get();
 		assertThat(throwable).isNotNull();
 		assertThat(throwable).isInstanceOf(AmqpRejectAndDontRequeueException.class);
@@ -493,11 +524,46 @@ public class EnableRabbitIntegrationTests {
 	}
 
 	@Test
+	public void testRabbitListenerValidation() throws InterruptedException {
+		ValidatedClass validatedObject = new ValidatedClass();
+		validatedObject.setBar(5);
+		this.jsonRabbitTemplate.convertAndSend("test.arg.validation", validatedObject);
+		assertThat(this.service.validationLatch.await(10, TimeUnit.SECONDS)).isTrue();
+		assertThat(this.service.validatedObject.validated).isTrue();
+		assertThat(this.service.validatedObject.valCount).isEqualTo(1);
+
+	}
+
+	@Test
+	public void testRabbitHandlerValidationFailed() throws InterruptedException {
+		ValidatedClass validatedObject = new ValidatedClass();
+		validatedObject.setBar(42);
+		this.jsonRabbitTemplate.convertAndSend("multi.json.exch", "multi.json.valid.rk", validatedObject);
+		assertThat(this.errorHandlerLatch2.await(10, TimeUnit.SECONDS)).isTrue();
+		Throwable throwable = this.errorHandlerError.get();
+		assertThat(throwable).isNotNull();
+		assertThat(throwable).isInstanceOf(AmqpRejectAndDontRequeueException.class);
+		assertThat(throwable.getCause()).isInstanceOf(ListenerExecutionFailedException.class);
+		assertThat(throwable.getCause().getCause()).isInstanceOf(MethodArgumentNotValidException.class);
+	}
+
+	@Test
+	public void testRabbitHandlerNoDefaultValidationCount() throws InterruptedException {
+		ValidatedClass validatedObject = new ValidatedClass();
+		validatedObject.setBar(8);
+		this.jsonRabbitTemplate.convertAndSend("multi.json.exch", "multi.json.valid.rk", validatedObject);
+		assertThat(this.multiValidated.latch.await(10, TimeUnit.SECONDS)).isTrue();
+		assertThat(this.multiValidated.validatedObject.validated).isTrue();
+		assertThat(this.multiValidated.validatedObject.valCount).isEqualTo(1);
+	}
+
+	@Test
 	public void testDifferentTypes() throws InterruptedException {
 		Foo1 foo = new Foo1();
 		foo.setBar("bar");
+		this.service.foos.clear();
 		this.jsonRabbitTemplate.convertAndSend("differentTypes", foo);
-		assertThat(this.service.latch.await(10, TimeUnit.SECONDS)).isTrue();
+		assertThat(this.service.dtLatch1.await(10, TimeUnit.SECONDS)).isTrue();
 		assertThat(this.service.foos.get(0)).isInstanceOf(Foo2.class);
 		assertThat(((Foo2) this.service.foos.get(0)).getBar()).isEqualTo("bar");
 		assertThat(TestUtils.getPropertyValue(this.registry.getListenerContainer("different"), "concurrentConsumers")).isEqualTo(2);
@@ -507,8 +573,9 @@ public class EnableRabbitIntegrationTests {
 	public void testDifferentTypesWithConcurrency() throws InterruptedException {
 		Foo1 foo = new Foo1();
 		foo.setBar("bar");
-		this.jsonRabbitTemplate.convertAndSend("differentTypes", foo);
-		assertThat(this.service.latch.await(10, TimeUnit.SECONDS)).isTrue();
+		this.service.foos.clear();
+		this.jsonRabbitTemplate.convertAndSend("differentTypes2", foo);
+		assertThat(this.service.dtLatch2.await(10, TimeUnit.SECONDS)).isTrue();
 		assertThat(this.service.foos.get(0)).isInstanceOf(Foo2.class);
 		assertThat(((Foo2) this.service.foos.get(0)).getBar()).isEqualTo("bar");
 		MessageListenerContainer container = this.registry.getListenerContainer("differentWithConcurrency");
@@ -520,8 +587,9 @@ public class EnableRabbitIntegrationTests {
 	public void testDifferentTypesWithVariableConcurrency() throws InterruptedException {
 		Foo1 foo = new Foo1();
 		foo.setBar("bar");
-		this.jsonRabbitTemplate.convertAndSend("differentTypes", foo);
-		assertThat(this.service.latch.await(10, TimeUnit.SECONDS)).isTrue();
+		this.service.foos.clear();
+		this.jsonRabbitTemplate.convertAndSend("differentTypes3", foo);
+		assertThat(this.service.dtLatch3.await(10, TimeUnit.SECONDS)).isTrue();
 		assertThat(this.service.foos.get(0)).isInstanceOf(Foo2.class);
 		assertThat(((Foo2) this.service.foos.get(0)).getBar()).isEqualTo("bar");
 		MessageListenerContainer container = this.registry.getListenerContainer("differentWithVariableConcurrency");
@@ -872,11 +940,9 @@ public class EnableRabbitIntegrationTests {
 		assertThat(message).isNotNull();
 		assertThat(new String(message.getBody())).isEqualTo("{\"field\":\"MESSAGING\"}");
 		assertThat(message.getMessageProperties().getHeaders().get("foo")).isEqualTo("bar");
-		Timer timer = null;
-		int n = 0;
-		while (timer == null && n++ < 100) {
+		Timer timer = await().until(() -> {
 			try {
-				timer = this.meterRegistry.get("spring.rabbitmq.listener")
+				return this.meterRegistry.get("spring.rabbitmq.listener")
 						.tag("listener.id", "list.of.messages")
 						.tag("queue", "test.messaging.message")
 						.tag("result", "success")
@@ -885,10 +951,9 @@ public class EnableRabbitIntegrationTests {
 						.timer();
 			}
 			catch (@SuppressWarnings("unused") Exception e) {
-				Thread.sleep(100);
+				return null;
 			}
-		}
-		assertThat(timer).isNotNull();
+		}, tim -> tim != null);
 		assertThat(timer.count()).isEqualTo(1L);
 	}
 
@@ -936,6 +1001,33 @@ public class EnableRabbitIntegrationTests {
 				.isInstanceOf(org.springframework.messaging.Message.class);
 		assertThat(this.myService.batch3Strings).hasSize(2);
 		assertThat(this.myService.batch3Strings.get(0)).isInstanceOf(String.class);
+	}
+
+	@Test
+	public void testCustomMethodArgumentResolverListener() throws InterruptedException {
+		MessageProperties properties = new MessageProperties();
+		properties.setHeader("customHeader", "fiz");
+		Message request = MessageTestUtils.createTextMessage("foo", properties);
+		this.rabbitTemplate.convertAndSend("test.custom.argument", request);
+		assertThat(this.myService.customMethodArgumentResolverLatch.await(10, TimeUnit.SECONDS)).isTrue();
+		assertThat(this.myService.customMethodArgument.body).isEqualTo("foo");
+		assertThat(this.myService.customMethodArgument.topic).isEqualTo("fiz");
+
+	}
+
+	@Test
+	void messagePropertiesParam() {
+		assertThat(this.rabbitTemplate.convertSendAndReceive("erit.mp.arg", "foo", msg -> {
+			msg.getMessageProperties().setHeader("myProp", "bar");
+			return msg;
+		})).isEqualTo("foo, myProp=bar");
+	}
+
+	@Test
+	void listenerWithBrokerNamedQueue() {
+		AbstractMessageListenerContainer container =
+				(AbstractMessageListenerContainer) this.registry.getListenerContainer("brokerNamed");
+		assertThat(container.getQueueNames()[0]).startsWith("amq.gen");
 	}
 
 	interface TxService {
@@ -998,13 +1090,21 @@ public class EnableRabbitIntegrationTests {
 
 		final List<Object> foos = new ArrayList<>();
 
-		final CountDownLatch latch = new CountDownLatch(1);
+		final CountDownLatch dtLatch1 = new CountDownLatch(1);
+
+		final CountDownLatch dtLatch2 = new CountDownLatch(1);
+
+		final CountDownLatch dtLatch3 = new CountDownLatch(1);
+
+		final CountDownLatch validationLatch = new CountDownLatch(1);
 
 		final CountDownLatch batch1Latch = new CountDownLatch(1);
 
 		final CountDownLatch batch2Latch = new CountDownLatch(1);
 
 		final CountDownLatch batch3Latch = new CountDownLatch(1);
+
+		final CountDownLatch customMethodArgumentResolverLatch = new CountDownLatch(1);
 
 		volatile Boolean channelBoundOk;
 
@@ -1013,6 +1113,10 @@ public class EnableRabbitIntegrationTests {
 		volatile List<org.springframework.messaging.Message<?>> messagingMessagesReceived;
 
 		volatile List<String> batch3Strings;
+
+		volatile CustomMethodArgument customMethodArgument;
+
+		volatile ValidatedClass validatedObject;
 
 		public MyService(RabbitTemplate txRabbitTemplate) {
 			this.txRabbitTemplate = txRabbitTemplate;
@@ -1091,7 +1195,7 @@ public class EnableRabbitIntegrationTests {
 			return foo.toUpperCase() + foo;
 		}
 
-		@RabbitListener(queues = "test.header", group = "testGroup", replyPostProcessor = "echoPrefixHeader")
+		@RabbitListener(queues = "test.header", group = "testGroup", replyPostProcessor = "#{'echoPrefixHeader'}")
 		public String capitalizeWithHeader(@Payload String content, @Header String prefix) {
 			return prefix + content.toUpperCase();
 		}
@@ -1137,24 +1241,25 @@ public class EnableRabbitIntegrationTests {
 
 		}
 
-		@RabbitListener(id = "different", queues = "differentTypes", containerFactory = "jsonListenerContainerFactory")
-		public void handleDifferent(Foo2 foo) {
+		@RabbitListener(id = "different", queues = "differentTypes",
+				containerFactory = "jsonListenerContainerFactoryNoClassMapper")
+		public void handleDifferent(@Validated Foo2 foo) {
 			foos.add(foo);
-			latch.countDown();
+			dtLatch1.countDown();
 		}
 
 		@RabbitListener(id = "differentWithConcurrency", queues = "differentTypes2",
-				containerFactory = "jsonListenerContainerFactory", concurrency = "#{3}")
-		public void handleDifferentWithConcurrency(Foo2 foo) {
+				containerFactory = "jsonListenerContainerFactoryNoClassMapper", concurrency = "#{3}")
+		public void handleDifferentWithConcurrency(Foo2 foo, MessageHeaders headers) {
 			foos.add(foo);
-			latch.countDown();
+			dtLatch2.countDown();
 		}
 
 		@RabbitListener(id = "differentWithVariableConcurrency", queues = "differentTypes3",
 				containerFactory = "jsonListenerContainerFactory", concurrency = "3-4")
 		public void handleDifferentWithVariableConcurrency(Foo2 foo) {
 			foos.add(foo);
-			latch.countDown();
+			dtLatch3.countDown();
 		}
 
 		@RabbitListener(id = "notStarted", containerFactory = "rabbitAutoStartFalseListenerContainerFactory",
@@ -1314,6 +1419,27 @@ public class EnableRabbitIntegrationTests {
 			this.batch3Latch.countDown();
 		}
 
+		@RabbitListener(queues = "test.custom.argument")
+		public void customMethodArgumentResolverListener(String data, CustomMethodArgument customMethodArgument) {
+			this.customMethodArgument = customMethodArgument;
+			this.customMethodArgumentResolverLatch.countDown();
+		}
+
+		@RabbitListener(queues = "test.arg.validation", containerFactory = "simpleJsonListenerContainerFactory")
+		public void handleValidArg(@Valid ValidatedClass validatedObject) {
+			this.validatedObject = validatedObject;
+			this.validationLatch.countDown();
+		}
+
+		@RabbitListener(queues = "erit.mp.arg")
+		public String mpArgument(String payload, MessageProperties props) {
+			return payload + ", myProp=" + props.getHeader("myProp");
+		}
+
+		@RabbitListener(id = "brokerNamed", queues = "#{@brokerNamed}")
+		void brokerNamed(String in) {
+		}
+
 	}
 
 	public static class JsonObject {
@@ -1373,6 +1499,19 @@ public class EnableRabbitIntegrationTests {
 			return "bar=" + this.bar;
 		}
 
+
+	}
+
+	public static class CustomMethodArgument {
+
+		final String body;
+
+		final String topic;
+
+		CustomMethodArgument(String body, String topic) {
+			this.body = body;
+			this.topic = topic;
+		}
 
 	}
 
@@ -1454,7 +1593,7 @@ public class EnableRabbitIntegrationTests {
 	@Configuration
 	@EnableRabbit
 	@EnableTransactionManagement
-	public static class EnableRabbitConfig {
+	public static class EnableRabbitConfig implements RabbitListenerConfigurer {
 
 		private int increment;
 
@@ -1582,6 +1721,19 @@ public class EnableRabbitIntegrationTests {
 		}
 
 		@Bean
+		public SimpleRabbitListenerContainerFactory jsonListenerContainerFactoryNoClassMapper() {
+			SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
+			factory.setConnectionFactory(rabbitConnectionFactory());
+			factory.setErrorHandler(errorHandler());
+			factory.setConsumerTagStrategy(consumerTagStrategy());
+			Jackson2JsonMessageConverter messageConverter = new Jackson2JsonMessageConverter();
+			factory.setMessageConverter(messageConverter);
+			factory.setReceiveTimeout(10L);
+			factory.setConcurrentConsumers(2);
+			return factory;
+		}
+
+		@Bean
 		public MeterRegistry meterRegistry() {
 			return new SimpleMeterRegistry();
 		}
@@ -1622,6 +1774,46 @@ public class EnableRabbitIntegrationTests {
 			return factory;
 		}
 
+		@Override
+		public void configureRabbitListeners(RabbitListenerEndpointRegistrar registrar) {
+			registrar.setValidator(new Validator() {
+				@Override
+				public boolean supports(Class<?> clazz) {
+					return ValidatedClass.class.isAssignableFrom(clazz);
+				}
+
+				@Override
+				public void validate(Object target, Errors errors) {
+					if (target instanceof ValidatedClass) {
+						if (((ValidatedClass) target).getBar() > 10) {
+							errors.reject("bar too large");
+						}
+						else {
+							((ValidatedClass) target).setValidated(true);
+						}
+					}
+				}
+			});
+			registrar.setCustomMethodArgumentResolvers(
+				new HandlerMethodArgumentResolver() {
+
+					@Override
+					public boolean supportsParameter(MethodParameter parameter) {
+						return CustomMethodArgument.class.isAssignableFrom(parameter.getParameterType());
+					}
+
+					@Override
+					public Object resolveArgument(MethodParameter parameter, org.springframework.messaging.Message<?> message) {
+						return new CustomMethodArgument(
+								(String) message.getPayload(),
+								message.getHeaders().get("customHeader", String.class)
+						);
+					}
+
+				}
+			);
+		}
+
 		@Bean
 		public String tagPrefix() {
 			return UUID.randomUUID().toString();
@@ -1643,7 +1835,12 @@ public class EnableRabbitIntegrationTests {
 		}
 
 		@Bean
-		public CountDownLatch errorHandlerLatch() {
+		public CountDownLatch errorHandlerLatch1() {
+			return new CountDownLatch(1);
+		}
+
+		@Bean
+		public CountDownLatch errorHandlerLatch2() {
 			return new CountDownLatch(1);
 		}
 
@@ -1655,16 +1852,22 @@ public class EnableRabbitIntegrationTests {
 		@Bean
 		public ErrorHandler errorHandler() {
 			ErrorHandler handler = Mockito.spy(new ConditionalRejectingErrorHandler());
-			doAnswer(invocation -> {
+			willAnswer(invocation -> {
 				try {
 					return invocation.callRealMethod();
 				}
 				catch (Throwable e) {
 					errorHandlerError().set(e);
-					errorHandlerLatch().countDown();
+					Throwable cause = e.getCause().getCause();
+					if (cause instanceof org.springframework.messaging.converter.MessageConversionException) {
+						errorHandlerLatch1().countDown();
+					}
+					else if (cause instanceof MethodArgumentNotValidException) {
+						errorHandlerLatch2().countDown();
+					}
 					throw e;
 				}
-			}).when(handler).handleError(Mockito.any(Throwable.class));
+			}).given(handler).handleError(Mockito.any(Throwable.class));
 			return handler;
 		}
 
@@ -1698,6 +1901,13 @@ public class EnableRabbitIntegrationTests {
 			return (msg, springMsg, ex) -> {
 				this.errorHandlerChannel = springMsg.getHeaders().get(AmqpHeaders.CHANNEL, Channel.class);
 				throw new RuntimeException("from error handler", ex.getCause());
+			};
+		}
+
+		@Bean
+		public RabbitListenerErrorHandler throwWrappedValidationException() {
+			return (msg, springMsg, ex) -> {
+				throw new RuntimeException("argument validation failed", ex);
 			};
 		}
 
@@ -1767,6 +1977,11 @@ public class EnableRabbitIntegrationTests {
 		}
 
 		@Bean
+		public MultiListenerValidatedJsonBean multiListenerValidatedJsonBean() {
+			return new MultiListenerValidatedJsonBean();
+		}
+
+		@Bean
 		public PlatformTransactionManager transactionManager() {
 			return mock(PlatformTransactionManager.class);
 		}
@@ -1814,6 +2029,11 @@ public class EnableRabbitIntegrationTests {
 				resp.getMessageProperties().setHeader("prefix", req.getMessageProperties().getHeader("prefix"));
 				return resp;
 			};
+		}
+
+		@Bean
+		org.springframework.amqp.core.Queue brokerNamed() {
+			return QueueBuilder.nonDurable("").autoDelete().exclusive().build();
 		}
 
 	}
@@ -1882,6 +2102,23 @@ public class EnableRabbitIntegrationTests {
 			return "QUX: " + qux.field + ": " + rk;
 		}
 
+	}
+
+	@RabbitListener(bindings = @QueueBinding
+			(value = @Queue,
+			 exchange = @Exchange(value = "multi.json.exch", autoDelete = "true"),
+			 key = "multi.json.valid.rk"), containerFactory = "simpleJsonListenerContainerFactory",
+			 returnExceptions = "true")
+	static class MultiListenerValidatedJsonBean {
+
+		final CountDownLatch latch = new CountDownLatch(1);
+		volatile ValidatedClass validatedObject;
+
+		@RabbitHandler
+		public void validatedListener(@Valid @Payload ValidatedClass validatedObject) {
+			this.validatedObject = validatedObject;
+			latch.countDown();
+		}
 	}
 
 	interface TxClassLevel {
@@ -2178,7 +2415,7 @@ public class EnableRabbitIntegrationTests {
 		}
 
 		@RabbitListener(queues = "test.converted.args2")
-		public String foo2a(@Payload Foo2 foo2, @Header("amqp_consumerQueue") String queue) {
+		public String foo2a(Foo2 foo2, @Header("amqp_consumerQueue") String queue) {
 			return foo2 + queue;
 		}
 
@@ -2229,6 +2466,43 @@ public class EnableRabbitIntegrationTests {
 		public String projection(Sample in) {
 			return in.getUsername() + in.getName();
 		}
+	}
+
+	@SuppressWarnings("serial")
+	public static class ValidatedClass implements Serializable {
+
+		private int bar;
+
+		private volatile boolean validated;
+
+		volatile int valCount;
+
+		public ValidatedClass() {
+		}
+
+		public ValidatedClass(int bar) {
+			this.bar = bar;
+		}
+
+		public int getBar() {
+			return this.bar;
+		}
+
+		public void setBar(int bar) {
+			this.bar = bar;
+		}
+
+		public boolean isValidated() {
+			return this.validated;
+		}
+
+		public void setValidated(boolean validated) {
+			this.validated = validated;
+			if (validated) { // don't count the json deserialization call
+				this.valCount++;
+			}
+		}
+
 	}
 
 	interface Sample {

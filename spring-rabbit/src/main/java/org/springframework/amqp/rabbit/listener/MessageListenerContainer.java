@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2020 the original author or authors.
+ * Copyright 2014-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,9 @@
 package org.springframework.amqp.rabbit.listener;
 
 import org.springframework.amqp.core.MessageListener;
+import org.springframework.beans.factory.InitializingBean;
 import org.springframework.context.SmartLifecycle;
+import org.springframework.lang.Nullable;
 
 /**
  * Internal abstraction used by the framework representing a message
@@ -27,7 +29,7 @@ import org.springframework.context.SmartLifecycle;
  * @author Gary Russell
  * @since 1.4
  */
-public interface MessageListenerContainer extends SmartLifecycle {
+public interface MessageListenerContainer extends SmartLifecycle, InitializingBean {
 
 	/**
 	 * Setup the message listener to use. Throws an {@link IllegalArgumentException}
@@ -55,6 +57,39 @@ public interface MessageListenerContainer extends SmartLifecycle {
 	 */
 	default boolean isConsumerBatchEnabled() {
 		return false;
+	}
+
+	/**
+	 * Set the queue names.
+	 * @param queues the queue names.
+	 * @since 2.4
+	 */
+	void setQueueNames(String... queues);
+
+	/**
+	 * Set auto startup.
+	 * @param autoStart true to auto start.
+	 * @since 2.4
+	 */
+	void setAutoStartup(boolean autoStart);
+
+	/**
+	 * Get the message listener.
+	 * @return The message listener object.
+	 * @since 2.4
+	 */
+	@Nullable
+	Object getMessageListener();
+
+	/**
+	 * Set the listener id.
+	 * @param id the id.
+	 * @since 2.4
+	 */
+	void setListenerId(String id);
+
+	@Override
+	default void afterPropertiesSet() {
 	}
 
 }
