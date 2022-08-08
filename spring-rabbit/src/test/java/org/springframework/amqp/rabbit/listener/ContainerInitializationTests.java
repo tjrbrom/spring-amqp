@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2020 the original author or authors.
+ * Copyright 2016-2022 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -63,7 +63,7 @@ public class ContainerInitializationTests {
 		}
 		catch (ApplicationContextException e) {
 			assertThat(e.getCause().getCause()).isInstanceOf(IllegalStateException.class);
-			assertThat(e.getMessage()).contains("When 'mismatchedQueuesFatal' is 'true', there must be "
+			assertThat(e.getCause().getMessage()).contains("When 'mismatchedQueuesFatal' is 'true', there must be "
 					+ "exactly one AmqpAdmin in the context or you must inject one into this container; found: 0");
 		}
 	}

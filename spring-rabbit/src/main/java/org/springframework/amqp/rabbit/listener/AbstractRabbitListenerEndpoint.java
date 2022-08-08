@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2021 the original author or authors.
+ * Copyright 2014-2022 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -84,7 +84,7 @@ public abstract class AbstractRabbitListenerEndpoint implements RabbitListenerEn
 
 	private TaskExecutor taskExecutor;
 
-	private boolean batchListener;
+	private Boolean batchListener;
 
 	private BatchingStrategy batchingStrategy;
 
@@ -293,7 +293,21 @@ public abstract class AbstractRabbitListenerEndpoint implements RabbitListenerEn
 		this.taskExecutor = taskExecutor;
 	}
 
+	/**
+	 * True if this endpoint is for a batch listener.
+	 * @return true if batch.
+	 */
 	public boolean isBatchListener() {
+		return this.batchListener == null ? false : this.batchListener;
+	}
+
+	/**
+	 * True if this endpoint is for a batch listener.
+	 * @return {@link Boolean#TRUE} if batch.
+	 * @since 3.0
+	 */
+	@Nullable
+	public Boolean getBatchListener() {
 		return this.batchListener;
 	}
 
@@ -308,6 +322,7 @@ public abstract class AbstractRabbitListenerEndpoint implements RabbitListenerEn
 		this.batchListener = batchListener;
 	}
 
+	@Override
 	@Nullable
 	public BatchingStrategy getBatchingStrategy() {
 		return this.batchingStrategy;

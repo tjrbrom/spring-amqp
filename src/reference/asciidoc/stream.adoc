@@ -67,6 +67,8 @@ The `ProducerCustomizer` provides a mechanism to customize the producer before i
 
 Refer to the https://rabbitmq.github.io/rabbitmq-stream-java-client/stable/htmlsingle/[Java Client Documentation] about customizing the `Environment` and `Producer`.
 
+IMPORTANT: In version 2.4.7 `RabbitStreamOperations2` and `RabbitStreamTemplate2` were added to assist migration to this version; `RabbitStreamOperations2` and `RabbitStreamTemplate2` are now deprecated in favor of `RabbitStreamOperations` and `RabbitStreamTemplate` respectively.
+
 ==== Receiving Messages
 
 Asynchronous message reception is provided by the `StreamListenerContainer` (and the `StreamRabbitListenerContainerFactory` when using `@RabbitListener`).
@@ -136,3 +138,48 @@ void nativeMsg(Message in, Context context) {
 }
 ----
 ====
+
+Version 2.4.5 added the `adviceChain` property to the `StreamListenerContainer` (and its factory).
+A new factory bean is also provided to create a stateless retry interceptor with an optional `StreamMessageRecoverer` for use when consuming raw stream messages.
+
+====
+[source, java]
+----
+@Bean
+public StreamRetryOperationsInterceptorFactoryBean sfb(RetryTemplate retryTemplate) {
+    StreamRetryOperationsInterceptorFactoryBean rfb =
+            new StreamRetryOperationsInterceptorFactoryBean();
+    rfb.setRetryOperations(retryTemplate);
+    rfb.setStreamMessageRecoverer((msg, context, throwable) -> {
+        ...
+    });
+    return rfb;
+}
+----
+====
+
+IMPORTANT: Stateful retry is not supported with this container.
+
+==== Super Streams
+
+A Super Stream is an abstract concept for a partitioned stream, implemented by binding a number of stream queues to an exchange having an argument `x-super-stream: true`.
+
+===== Provisioning
+
+For convenience, a super stream can be provisioned by defining a single bean of type `SuperStream`.
+
+====
+[source, java]
+----
+@Bean
+SuperStream superStream() {
+    return new SuperStream("my.super.stream", 3);
+}
+----
+====
+
+The `RabbitAdmin` detects this bean and will declare the exchange (`my.super.stream`) and 3 queues (partitions) - `my.super-stream-n` where `n` is `0`, `1`, `2`, bound with routing keys equal to `n`.
+
+===== Consuming Super Streams with Single Active Consumers
+
+TBD.

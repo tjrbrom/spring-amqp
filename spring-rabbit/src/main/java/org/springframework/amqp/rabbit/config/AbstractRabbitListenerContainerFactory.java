@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2021 the original author or authors.
+ * Copyright 2014-2022 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@ import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.rabbit.batch.BatchingStrategy;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.listener.AbstractMessageListenerContainer;
+import org.springframework.amqp.rabbit.listener.MessageAckListener;
 import org.springframework.amqp.rabbit.listener.RabbitListenerEndpoint;
 import org.springframework.amqp.support.ConsumerTagStrategy;
 import org.springframework.amqp.support.converter.MessageConverter;
@@ -39,7 +40,6 @@ import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.ApplicationEventPublisherAware;
-import org.springframework.lang.Nullable;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.util.Assert;
 import org.springframework.util.ErrorHandler;
@@ -86,8 +86,6 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 
 	private Boolean globalQos;
 
-	private Advice[] adviceChain;
-
 	private BackOff recoveryBackOff;
 
 	private Boolean missingQueuesFatal;
@@ -117,6 +115,8 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 	private BatchingStrategy batchingStrategy;
 
 	private Boolean deBatchingEnabled;
+
+	private MessageAckListener messageAckListener;
 
 	/**
 	 * @param connectionFactory The connection factory.
@@ -180,23 +180,6 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 	 */
 	public void setPrefetchCount(Integer prefetch) {
 		this.prefetchCount = prefetch;
-	}
-
-	/**
-	 * @return the advice chain that was set. Defaults to {@code null}.
-	 * @since 1.7.4
-	 */
-	@Nullable
-	public Advice[] getAdviceChain() {
-		return this.adviceChain == null ? null : Arrays.copyOf(this.adviceChain, this.adviceChain.length);
-	}
-
-	/**
-	 * @param adviceChain the advice chain to set.
-	 * @see AbstractMessageListenerContainer#setAdviceChain
-	 */
-	public void setAdviceChain(Advice... adviceChain) {
-		this.adviceChain = adviceChain == null ? null : Arrays.copyOf(adviceChain, adviceChain.length);
 	}
 
 	/**
@@ -343,6 +326,16 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 		this.globalQos = globalQos;
 	}
 
+	/**
+	 * Set a {@link MessageAckListener} to use when ack a message(messages) in
+	 * {@link AcknowledgeMode#AUTO} mode.
+	 * @param messageAckListener the messageAckListener.
+	 * @since 2.4.6
+	 */
+	public void setMessageAckListener(MessageAckListener messageAckListener) {
+		this.messageAckListener = messageAckListener;
+	}
+
 	@Override
 	public C createListenerContainer(RabbitListenerEndpoint endpoint) {
 		C instance = createContainerInstance();
@@ -354,6 +347,7 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 		if (this.messageConverter != null && endpoint != null && endpoint.getMessageConverter() == null) {
 			endpoint.setMessageConverter(this.messageConverter);
 		}
+		Advice[] adviceChain = getAdviceChain();
 		javaUtils
 			.acceptIfNotNull(this.acknowledgeMode, instance::setAcknowledgeMode)
 			.acceptIfNotNull(this.channelTransacted, instance::setChannelTransacted)
@@ -363,7 +357,7 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 			.acceptIfNotNull(this.prefetchCount, instance::setPrefetchCount)
 			.acceptIfNotNull(this.globalQos, instance::setGlobalQos)
 			.acceptIfNotNull(getDefaultRequeueRejected(), instance::setDefaultRequeueRejected)
-			.acceptIfNotNull(this.adviceChain, instance::setAdviceChain)
+			.acceptIfNotNull(adviceChain, instance::setAdviceChain)
 			.acceptIfNotNull(this.recoveryBackOff, instance::setRecoveryBackOff)
 			.acceptIfNotNull(this.mismatchedQueuesFatal, instance::setMismatchedQueuesFatal)
 			.acceptIfNotNull(this.missingQueuesFatal, instance::setMissingQueuesFatal)
@@ -374,7 +368,9 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 			.acceptIfNotNull(this.autoStartup, instance::setAutoStartup)
 			.acceptIfNotNull(this.phase, instance::setPhase)
 			.acceptIfNotNull(this.afterReceivePostProcessors, instance::setAfterReceivePostProcessors)
-			.acceptIfNotNull(this.deBatchingEnabled, instance::setDeBatchingEnabled);
+			.acceptIfNotNull(this.deBatchingEnabled, instance::setDeBatchingEnabled)
+			.acceptIfNotNull(this.messageAckListener, instance::setMessageAckListener)
+			.acceptIfNotNull(this.batchingStrategy, instance::setBatchingStrategy);
 		if (this.batchListener && this.deBatchingEnabled == null) {
 			// turn off container debatching by default for batch listeners
 			instance.setDeBatchingEnabled(false);
@@ -383,9 +379,11 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 			javaUtils
 				.acceptIfNotNull(endpoint.getTaskExecutor(), instance::setTaskExecutor)
 				.acceptIfNotNull(endpoint.getAckMode(), instance::setAcknowledgeMode)
-				.acceptIfNotNull(this.batchingStrategy, endpoint::setBatchingStrategy);
+				.acceptIfNotNull(endpoint.getBatchingStrategy(), instance::setBatchingStrategy);
 			instance.setListenerId(endpoint.getId());
-			endpoint.setBatchListener(this.batchListener);
+			if (endpoint.getBatchListener() == null) {
+				endpoint.setBatchListener(this.batchListener);
+			}
 		}
 		applyCommonOverrides(endpoint, instance);
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2021 the original author or authors.
+ * Copyright 2002-2022 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -65,6 +65,7 @@ import org.springframework.amqp.support.ConsumerTagStrategy;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.lang.Nullable;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.util.Assert;
 import org.springframework.util.ObjectUtils;
 import org.springframework.util.backoff.BackOffExecution;
 
@@ -87,6 +88,7 @@ import com.rabbitmq.utility.Utility;
  * @author Alex Panchenko
  * @author Johno Crawford
  * @author Ian Roberts
+ * @author Cao Weibo
  */
 public class BlockingQueueConsumer {
 
@@ -172,6 +174,8 @@ public class BlockingQueueConsumer {
 
 	volatile boolean declaring; // NOSONAR package protected
 
+	private MessageAckListener messageAckListener;
+
 	/**
 	 * Create a consumer. The consumer must not attempt to use
 	 * the connection factory or communicate with the broker
@@ -188,6 +192,7 @@ public class BlockingQueueConsumer {
 			MessagePropertiesConverter messagePropertiesConverter,
 			ActiveObjectCounter<BlockingQueueConsumer> activeObjectCounter, AcknowledgeMode acknowledgeMode,
 			boolean transactional, int prefetchCount, String... queues) {
+
 		this(connectionFactory, messagePropertiesConverter, activeObjectCounter,
 				acknowledgeMode, transactional, prefetchCount, true, queues);
 	}
@@ -399,6 +404,17 @@ public class BlockingQueueConsumer {
 	}
 
 	/**
+	 * Set a {@link MessageAckListener} to use when ack a message(messages) in
+	 * {@link AcknowledgeMode#AUTO} mode.
+	 * @param messageAckListener the messageAckListener.
+	 * @since 2.4.6
+	 */
+	public void setMessageAckListener(MessageAckListener messageAckListener) {
+		Assert.notNull(messageAckListener, "'messageAckListener' cannot be null");
+		this.messageAckListener = messageAckListener;
+	}
+
+	/**
 	 * Clear the delivery tags when rolling back with an external transaction
 	 * manager.
 	 * @since 1.6.6
@@ -554,7 +570,8 @@ public class BlockingQueueConsumer {
 					Connection connection = null; // NOSONAR - RabbitUtils
 					Channel channelForCheck = null;
 					try {
-						channelForCheck = this.connectionFactory.createConnection().createChannel(false);
+						connection = this.connectionFactory.createConnection();
+						channelForCheck = connection.createChannel(false);
 						channelForCheck.queueDeclarePassive(queueToCheck);
 						if (logger.isInfoEnabled()) {
 							logger.info("Queue '" + queueToCheck + "' is now available");
@@ -839,7 +856,6 @@ public class BlockingQueueConsumer {
 	 * @throws IOException Any IOException.
 	 */
 	public boolean commitIfNecessary(boolean localTx) throws IOException {
-
 		if (this.deliveryTags.isEmpty()) {
 			return false;
 		}
@@ -856,7 +872,14 @@ public class BlockingQueueConsumer {
 
 			if (ackRequired && (!this.transactional || isLocallyTransacted)) {
 				long deliveryTag = new ArrayList<Long>(this.deliveryTags).get(this.deliveryTags.size() - 1);
-				this.channel.basicAck(deliveryTag, true);
+				try {
+					this.channel.basicAck(deliveryTag, true);
+					notifyMessageAckListener(true, deliveryTag, null);
+				}
+				catch (Exception e) {
+					logger.error("Error acking.", e);
+					notifyMessageAckListener(false, deliveryTag, e);
+				}
 			}
 
 			if (isLocallyTransacted) {
@@ -871,6 +894,22 @@ public class BlockingQueueConsumer {
 
 		return true;
 
+	}
+
+	/**
+	 * Notify MessageAckListener set on message listener.
+	 * @param success Whether ack succeeded.
+	 * @param deliveryTag The deliveryTag of ack.
+	 * @param cause If an exception occurs.
+	 * @since 2.4.6
+	 */
+	private void notifyMessageAckListener(boolean success, long deliveryTag, @Nullable Throwable cause) {
+		try {
+			this.messageAckListener.onComplete(success, deliveryTag, cause);
+		}
+		catch (Exception e) {
+			logger.error("An exception occured in MessageAckListener.", e);
+		}
 	}
 
 	@Override

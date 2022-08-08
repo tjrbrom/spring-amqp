@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2021 the original author or authors.
+ * Copyright 2016-2022 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,6 +36,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.aopalliance.intercept.MethodInterceptor;
@@ -47,6 +48,8 @@ import org.junit.jupiter.api.TestInfo;
 import org.mockito.ArgumentCaptor;
 
 import org.springframework.amqp.AmqpAuthenticationException;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageListener;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.Connection;
@@ -80,6 +83,7 @@ import com.rabbitmq.client.Consumer;
  * @author Gary Russell
  * @author Artem Bilan
  * @author Alex Panchenko
+ * @author Cao Weibo
  *
  * @since 2.0
  *
@@ -718,6 +722,109 @@ public class DirectMessageListenerContainerIntegrationTests {
 		container.stop();
 		admin.deleteQueue(MISSING);
 		cf.destroy();
+	}
+
+	@Test
+	public void testMessageAckListenerWithSuccessfulAck() throws Exception {
+		CachingConnectionFactory cf = new CachingConnectionFactory("localhost");
+		DirectMessageListenerContainer container = new DirectMessageListenerContainer(cf);
+		final AtomicInteger calledTimes = new AtomicInteger();
+		final AtomicReference<Long> ackDeliveryTag = new AtomicReference<>();
+		final AtomicReference<Boolean> ackSuccess = new AtomicReference<>();
+		final AtomicReference<Throwable> ackCause = new AtomicReference<>();
+		final CountDownLatch latch = new CountDownLatch(1);
+		container.setQueueNames(Q1);
+		container.setMessageListener(new MessageListener() {
+			@Override
+			public void onMessage(Message message) {
+			}
+		});
+		container.setMessageAckListener((success, deliveryTag, cause) -> {
+			calledTimes.incrementAndGet();
+			ackDeliveryTag.set(deliveryTag);
+			ackSuccess.set(success);
+			ackCause.set(cause);
+			latch.countDown();
+		});
+		container.start();
+		RabbitTemplate rabbitTemplate = new RabbitTemplate(cf);
+		final int messageCount = 5;
+		for (int i = 0; i < messageCount; i++) {
+			rabbitTemplate.convertAndSend(Q1, "foo");
+		}
+		assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
+		container.stop();
+		assertThat(calledTimes.get()).isEqualTo(messageCount);
+		assertThat(ackSuccess.get()).isTrue();
+		assertThat(ackCause.get()).isNull();
+		assertThat(ackDeliveryTag.get()).isEqualTo(messageCount);
+	}
+
+	@Test
+	public void testMessageAckListenerWithFailedAck() throws Exception {
+		CachingConnectionFactory cf = new CachingConnectionFactory("localhost");
+		DirectMessageListenerContainer container = new DirectMessageListenerContainer(cf);
+		final AtomicReference<Boolean> called = new AtomicReference<>();
+		final AtomicReference<Long> ackDeliveryTag = new AtomicReference<>();
+		final AtomicReference<Boolean> ackSuccess = new AtomicReference<>();
+		final AtomicReference<Throwable> ackCause = new AtomicReference<>();
+		final CountDownLatch latch = new CountDownLatch(1);
+		container.setQueueNames(Q1);
+		container.setMessageListener(new MessageListener() {
+			@Override
+			public void onMessage(Message message) {
+				cf.resetConnection();
+			}
+		});
+		container.setMessageAckListener((success, deliveryTag, cause) -> {
+			called.set(true);
+			ackDeliveryTag.set(deliveryTag);
+			ackSuccess.set(success);
+			ackCause.set(cause);
+			latch.countDown();
+		});
+		container.start();
+		new RabbitTemplate(cf).convertAndSend(Q1, "foo");
+		assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
+		container.stop();
+		assertThat(called.get()).isTrue();
+		assertThat(ackSuccess.get()).isFalse();
+		assertThat(ackCause.get().getMessage()).isEqualTo("Channel closed; cannot ack/nack");
+		assertThat(ackDeliveryTag.get()).isEqualTo(1);
+	}
+
+	@Test
+	public void testMessageAckListenerWithBatchAck() throws Exception {
+		final AtomicInteger calledTimes = new AtomicInteger();
+		final AtomicReference<Long> ackDeliveryTag = new AtomicReference<>();
+		final AtomicReference<Boolean> ackSuccess = new AtomicReference<>();
+		final AtomicReference<Throwable> ackCause = new AtomicReference<>();
+		CachingConnectionFactory cf = new CachingConnectionFactory("localhost");
+		DirectMessageListenerContainer container = new DirectMessageListenerContainer(cf);
+		final int messageCount = 5;
+		final CountDownLatch latch = new CountDownLatch(1);
+		container.setQueueNames(Q1);
+		container.setMessagesPerAck(messageCount);
+		container.setMessageListener(message -> {
+		});
+		container.setMessageAckListener((success, deliveryTag, cause) -> {
+			calledTimes.incrementAndGet();
+			ackDeliveryTag.set(deliveryTag);
+			ackSuccess.set(success);
+			ackCause.set(cause);
+			latch.countDown();
+		});
+		container.start();
+		RabbitTemplate rabbitTemplate = new RabbitTemplate(cf);
+		for (int i = 0; i < messageCount; i++) {
+			rabbitTemplate.convertAndSend(Q1, "foo");
+		}
+		assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
+		container.stop();
+		assertThat(calledTimes.get()).isEqualTo(1);
+		assertThat(ackSuccess.get()).isTrue();
+		assertThat(ackCause.get()).isNull();
+		assertThat(ackDeliveryTag.get()).isEqualTo(messageCount);
 	}
 
 	private boolean consumersOnQueue(String queue, int expected) throws Exception {

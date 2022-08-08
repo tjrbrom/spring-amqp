@@ -1,5 +1,5 @@
 /*
- * Copyright 2019-2020 the original author or authors.
+ * Copyright 2019-2022 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@ package org.springframework.amqp.rabbit.annotation;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -51,7 +53,7 @@ import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
  */
 @SpringJUnitConfig
 @DirtiesContext
-@RabbitAvailable(queues = { "batch.1", "batch.2", "batch.3", "batch.4" })
+@RabbitAvailable(queues = { "batch.1", "batch.2", "batch.3", "batch.4", "batch.5" })
 public class EnableRabbitBatchIntegrationTests {
 
 	@Autowired
@@ -114,6 +116,16 @@ public class EnableRabbitBatchIntegrationTests {
 				.isEqualTo(2);
 	}
 
+	@Test
+	public void collectionWithStringInfer() throws InterruptedException {
+		this.template.convertAndSend("batch.5", new Foo("foo"));
+		this.template.convertAndSend("batch.5", new Foo("bar"));
+		assertThat(this.listener.fivesLatch.await(10, TimeUnit.SECONDS)).isTrue();
+		assertThat(this.listener.fives).hasSize(2);
+		assertThat(this.listener.fives.get(0).getBar()).isEqualTo("foo");
+		assertThat(this.listener.fives.get(1).getBar()).isEqualTo("bar");
+	}
+
 	@Configuration
 	@EnableRabbit
 	public static class Config {
@@ -143,7 +155,7 @@ public class EnableRabbitBatchIntegrationTests {
 		public SimpleRabbitListenerContainerFactory consumerBatchContainerFactory() {
 			SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
 			factory.setConnectionFactory(connectionFactory());
-			factory.setBatchListener(true);
+			factory.setBatchListener(false);
 			factory.setConsumerBatchEnabled(true);
 			factory.setBatchSize(2);
 			return factory;
@@ -186,6 +198,10 @@ public class EnableRabbitBatchIntegrationTests {
 
 		CountDownLatch fooConsumerBatchTooLatch = new CountDownLatch(1);
 
+		List<Foo> fives = new ArrayList<>();
+
+		CountDownLatch fivesLatch = new CountDownLatch(1);
+
 		private List<org.springframework.amqp.core.Message> nativeMessages;
 
 		private final CountDownLatch nativeMessagesLatch = new CountDownLatch(1);
@@ -202,7 +218,7 @@ public class EnableRabbitBatchIntegrationTests {
 			this.fooMessagesLatch.countDown();
 		}
 
-		@RabbitListener(queues = "batch.3", containerFactory = "consumerBatchContainerFactory")
+		@RabbitListener(queues = "batch.3", containerFactory = "consumerBatchContainerFactory", batch = "true")
 		public void listen3(List<Foo> in) {
 			this.foosConsumerBatchToo = in;
 			this.fooConsumerBatchTooLatch.countDown();
@@ -212,6 +228,12 @@ public class EnableRabbitBatchIntegrationTests {
 		public void listen4(List<org.springframework.amqp.core.Message> in) {
 			this.nativeMessages = in;
 			this.nativeMessagesLatch.countDown();
+		}
+
+		@RabbitListener(queues = "batch.5")
+		public void listen5(Collection<Foo> in) {
+			this.fives.addAll(in);
+			this.fivesLatch.countDown();
 		}
 
 	}
