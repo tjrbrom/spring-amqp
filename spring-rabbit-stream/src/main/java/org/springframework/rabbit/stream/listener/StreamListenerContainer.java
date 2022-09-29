@@ -90,10 +90,28 @@ public class StreamListenerContainer implements MessageListenerContainer, BeanNa
 		this.streamConverter = new DefaultStreamMessageConverter(codec);
 	}
 
+	/**
+	 * {@inheritDoc}
+	 * Mutually exclusive with {@link #superStream(String, String)}.
+	 */
 	@Override
 	public void setQueueNames(String... queueNames) {
 		Assert.isTrue(queueNames != null && queueNames.length == 1, "Only one stream is supported");
 		this.builder.stream(queueNames[0]);
+	}
+
+	/**
+	 * Enable Single Active Consumer on a Super Stream.
+	 * Mutually exclusive with {@link #setQueueNames(String...)}.
+	 * @param superStream the stream.
+	 * @param name the consumer name.
+	 * @since 3.0
+	 */
+	public void superStream(String superStream, String name) {
+		Assert.notNull(superStream, "'superStream' cannot be null");
+		this.builder.superStream(superStream)
+				.singleActiveConsumer()
+				.name(name);
 	}
 
 	/**

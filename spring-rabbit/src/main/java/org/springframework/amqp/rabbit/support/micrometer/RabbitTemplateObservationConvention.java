@@ -14,25 +14,28 @@
  * limitations under the License.
  */
 
-package org.springframework.rabbit.stream.producer;
+package org.springframework.amqp.rabbit.support.micrometer;
 
-import java.util.concurrent.CompletableFuture;
-
-import com.rabbitmq.stream.Environment;
+import io.micrometer.observation.Observation.Context;
+import io.micrometer.observation.ObservationConvention;
 
 /**
- * This interface was added in 2.4.7 to aid migration from methods returning
- * {@code ListenableFuture}s to {@link CompletableFuture}s.
+ * {@link ObservationConvention} for Rabbit template key values.
  *
  * @author Gary Russell
- * @since 2.8
- * @deprecated in favor of {@link RabbitStreamTemplate}.
+ * @since 3.0
+ *
  */
-@Deprecated
-public class RabbitStreamTemplate2 extends RabbitStreamTemplate implements RabbitStreamOperations2 {
+public interface RabbitTemplateObservationConvention extends ObservationConvention<RabbitMessageSenderContext> {
 
-	public RabbitStreamTemplate2(Environment environment, String streamName) {
-		super(environment, streamName);
+	@Override
+	default boolean supportsContext(Context context) {
+		return context instanceof RabbitMessageSenderContext;
+	}
+
+	@Override
+	default String getName() {
+		return "spring.rabbit.template";
 	}
 
 }

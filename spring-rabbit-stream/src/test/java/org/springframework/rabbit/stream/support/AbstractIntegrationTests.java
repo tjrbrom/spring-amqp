@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 the original author or authors.
+ * Copyright 2021-2022 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ package org.springframework.rabbit.stream.support;
 import java.time.Duration;
 
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.utility.DockerImageName;
+import org.testcontainers.containers.RabbitMQContainer;
 
 /**
  * @author Gary Russell
@@ -33,13 +33,14 @@ public abstract class AbstractIntegrationTests {
 	static {
 		if (System.getProperty("spring.rabbit.use.local.server") == null
 				&& System.getenv("SPRING_RABBIT_USE_LOCAL_SERVER") == null) {
-			String image = "pivotalrabbitmq/rabbitmq-stream";
+			String image = "rabbitmq:3.11";
 			String cache = System.getenv().get("IMAGE_CACHE");
 			if (cache != null) {
 				image = cache + image;
 			}
-			RABBITMQ = new GenericContainer<>(DockerImageName.parse(image))
+			RABBITMQ = new RabbitMQContainer(image)
 						.withExposedPorts(5672, 15672, 5552)
+						.withPluginsEnabled("rabbitmq_stream", "rabbitmq_management")
 						.withStartupTimeout(Duration.ofMinutes(2));
 			RABBITMQ.start();
 		}

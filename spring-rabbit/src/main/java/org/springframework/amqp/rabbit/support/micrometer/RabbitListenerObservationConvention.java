@@ -14,19 +14,28 @@
  * limitations under the License.
  */
 
-package org.springframework.amqp.core;
+package org.springframework.amqp.rabbit.support.micrometer;
 
-import java.util.concurrent.CompletableFuture;
+import io.micrometer.observation.Observation.Context;
+import io.micrometer.observation.ObservationConvention;
 
 /**
- * This interface was added in 2.4.7 to aid migration from methods returning
- * {@code ListenableFuture}s to {@link CompletableFuture}s.
+ * {@link ObservationConvention} for Rabbit listener key values.
  *
  * @author Gary Russell
- * @since 2.4.7
- * @deprecated in favor of {@link AsyncAmqpTemplate}.
+ * @since 3.0
+ *
  */
-@Deprecated
-public interface AsyncAmqpTemplate2 extends AsyncAmqpTemplate {
+public interface RabbitListenerObservationConvention extends ObservationConvention<RabbitMessageReceiverContext> {
+
+	@Override
+	default boolean supportsContext(Context context) {
+		return context instanceof RabbitMessageReceiverContext;
+	}
+
+	@Override
+	default String getName() {
+		return "spring.rabbit.listener";
+	}
 
 }
