@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2020 the original author or authors.
+ * Copyright 2002-2022 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,8 +17,16 @@
 package org.springframework.amqp.rabbit.junit;
 
 import java.io.IOException;
+import java.net.Authenticator;
+import java.net.PasswordAuthentication;
+import java.net.URI;
 import java.net.URISyntaxException;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -30,13 +38,14 @@ import java.util.concurrent.TimeoutException;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
+import org.springframework.http.HttpStatus;
 import org.springframework.util.Base64Utils;
 import org.springframework.util.StringUtils;
+import org.springframework.web.util.UriUtils;
 
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
-import com.rabbitmq.http.client.Client;
 
 /**
  * A class that can be used to prevent integration tests from failing if the Rabbit broker application is
@@ -372,13 +381,49 @@ public final class BrokerRunningSupport {
 			}
 		}
 		if (this.management) {
-			Client client = new Client(getAdminUri(), this.adminUser, this.adminPassword);
-			if (!client.alivenessTest("/")) {
-				throw new BrokerNotAliveException("Aliveness test failed for localhost:15672 guest/quest; "
-						+ "management not available");
-			}
+			alivenessTest();
 		}
 		return channel;
+	}
+
+	private void alivenessTest() throws URISyntaxException {
+		HttpClient client = HttpClient.newBuilder()
+				.authenticator(new Authenticator() {
+
+					@Override
+					protected PasswordAuthentication getPasswordAuthentication() {
+						return new PasswordAuthentication(getAdminUser(), getAdminPassword().toCharArray());
+					}
+
+				})
+				.build();
+		URI uri = new URI(getAdminUri())
+				.resolve("/api/aliveness-test/" + UriUtils.encodePathSegment("/", StandardCharsets.UTF_8));
+		HttpRequest request = HttpRequest.newBuilder()
+				.GET()
+				.uri(uri)
+				.build();
+		HttpResponse<String> response;
+		try {
+			response = client.send(request, BodyHandlers.ofString());
+		}
+		catch (IOException ex) {
+			throw new BrokerNotAliveException("Failed to check aliveness", ex);
+		}
+		catch (InterruptedException ex) {
+			Thread.currentThread().interrupt();
+			throw new BrokerNotAliveException("Interrupted while checking aliveness", ex);
+		}
+		String body = null;
+		if (response.statusCode() == HttpStatus.OK.value()) {
+			body = response.body();
+		}
+		if (body == null || !body.contentEquals("{\"status\":\"ok\"}")) {
+			throw new BrokerNotAliveException("Aliveness test failed for " + uri.toString()
+					+ " user: " + getAdminUser() + " pw: " + getAdminPassword()
+					+ " status: " + response.statusCode() + " body: " + body
+					+ "; management not available");
+		}
 	}
 
 	public static boolean fatal() {
