@@ -159,7 +159,6 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 
 	private TransactionAttribute transactionAttribute = new DefaultTransactionAttribute();
 
-	@Nullable
 	private String beanName = "not.a.Spring.bean";
 
 	private Executor taskExecutor = new SimpleAsyncTaskExecutor();
@@ -706,7 +705,6 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * The 'id' attribute of the listener.
 	 * @return the id (or the container bean name if no id set).
 	 */
-	@Nullable
 	public String getListenerId() {
 		return this.listenerId != null ? this.listenerId : this.beanName;
 	}
@@ -1266,11 +1264,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		try {
 			if (this.micrometerHolder == null && MICROMETER_PRESENT && this.micrometerEnabled && !this.observationEnabled
 					&& this.applicationContext != null) {
-				String id = getListenerId();
-				if (id == null) {
-					id = "no_id_or_beanName";
-				}
-				this.micrometerHolder = new MicrometerHolder(this.applicationContext, id,
+				this.micrometerHolder = new MicrometerHolder(this.applicationContext, getListenerId(),
 						this.micrometerTags);
 			}
 		}
@@ -1642,7 +1636,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		if (listener instanceof ChannelAwareMessageListener chaml) {
 			doInvokeListener(chaml, channel, data);
 		}
-		else if (listener instanceof MessageListener msgListener) {
+		else if (listener instanceof MessageListener msgListener) { // NOSONAR
 			boolean bindChannel = isExposeListenerChannel() && isChannelLocallyTransacted();
 			if (bindChannel) {
 				RabbitResourceHolder resourceHolder = new RabbitResourceHolder(channel, false);
