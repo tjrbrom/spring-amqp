@@ -4,7 +4,10 @@ buildscript {
 	repositories {
 		mavenCentral()
 		gradlePluginPortal()
-		maven { url 'https://repo.spring.io/plugins-release' }
+		maven { url 'https://repo.spring.io/plugins-release-local' }
+		if (version.endsWith('SNAPSHOT')) {
+			maven { url 'https://repo.spring.io/snapshot' }
+		}
 	}
 	dependencies {
 		classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinVersion"
@@ -49,16 +52,16 @@ ext {
 	googleJsr305Version = '3.0.2'
 	hamcrestVersion = '2.2'
 	hibernateValidationVersion = '7.0.5.Final'
-	jacksonBomVersion = '2.13.4.20221013'
+	jacksonBomVersion = '2.14.0'
 	jaywayJsonPathVersion = '2.7.0'
 	junit4Version = '4.13.2'
 	junitJupiterVersion = '5.9.1'
 	log4jVersion = '2.19.0'
 	logbackVersion = '1.4.4'
 	lz4Version = '1.8.0'
-	micrometerDocsVersion = '1.0.0-SNAPSHOT'
-	micrometerVersion = '1.10.0-RC1'
-	micrometerTracingVersion = '1.0.0-RC1'
+	micrometerDocsVersion = '1.0.0'
+	micrometerVersion = '1.10.0'
+	micrometerTracingVersion = '1.0.0'
 	mockitoVersion = '4.8.0'
 	rabbitmqStreamVersion = '0.8.0'
 	rabbitmqVersion = project.hasProperty('rabbitmqVersion') ? project.rabbitmqVersion : '5.16.0'
@@ -69,6 +72,8 @@ ext {
 	springRetryVersion = '2.0.0-RC1'
 	testContainersVersion = '1.17.5'
 	zstdJniVersion = '1.5.0-2'
+
+	javaProjects = subprojects - project(':spring-amqp-bom')
 }
 
 nohttp {
@@ -122,10 +127,10 @@ ext {
 	] as String[]
 }
 
-subprojects { subproject ->
+configure(javaProjects) { subproject ->
 	apply plugin: 'java-library'
 	apply plugin: 'java'
-	apply from:   "${rootProject.projectDir}/publish-maven.gradle"
+	apply from:   "${rootProject.projectDir}/gradle/publish-maven.gradle"
 	apply plugin: 'eclipse'
 	apply plugin: 'idea'
 	apply plugin: 'project-report'
@@ -373,6 +378,33 @@ project('spring-amqp') {
 
 }
 
+project('spring-amqp-bom') {
+	description = 'Spring for RabbitMQ (Bill of Materials)'
+
+	apply plugin: 'java-platform'
+	apply from: "${rootDir}/gradle/publish-maven.gradle"
+
+	dependencies {
+		constraints {
+			javaProjects.sort { "$it.name" }.each {
+				api it
+			}
+		}
+	}
+
+	publishing {
+		publications {
+			mavenJava(MavenPublication) {
+				from components.javaPlatform
+			}
+		}
+	}
+
+	sonarqube {
+		skipProject = true
+	}
+}
+
 project('spring-rabbit') {
 	description = 'Spring RabbitMQ Support'
 
@@ -615,11 +647,11 @@ task api(type: Javadoc) {
 		addBooleanOption('Xdoclint:syntax', true) // only check syntax with doclint
 	}
 
-	source subprojects.collect { project ->
+	source javaProjects.collect { project ->
 		project.sourceSets.main.allJava
 	}
 	destinationDir = new File(buildDir, 'api')
-	classpath = files(subprojects.collect { project ->
+	classpath = files(javaProjects.collect { project ->
 		project.sourceSets.main.compileClasspath
 	})
 }
@@ -630,7 +662,7 @@ task schemaZip(type: Zip) {
 	description = "Builds -${archiveClassifier} archive containing all " +
 		"XSDs for deployment at static.springframework.org/schema."
 
-	subprojects.each { subproject ->
+	javaProjects.each { subproject ->
 		def Set files = new HashSet()
 		def Properties schemas = new Properties();
 		def shortName = subproject.name.replaceFirst("${rootProject.name}-", '')
@@ -714,13 +746,19 @@ task distZip(type: Zip, dependsOn: [docsZip, schemaZip]) {
 		into "${baseDir}/schema"
 	}
 
-	subprojects.each { subproject ->
+	javaProjects.each { subproject ->
 		into ("${baseDir}/libs") {
 			from subproject.jar
 			from subproject.sourcesJar
 			from subproject.javadocJar
 		}
 	}
+
+	from(project(':spring-amqp-bom').generatePomFileForMavenJavaPublication) {
+		into "${baseDir}/libs"
+		rename 'pom-default.xml', "spring-amqp-bom-${project.version}.xml"
+	}
+
 }
 
 // Create an optional "with dependencies" distribution.
@@ -766,7 +804,7 @@ task dist(dependsOn: assemble) {
 	description = 'Builds -dist, -docs and -schema distribution archives.'
 }
 
-apply from: "${rootProject.projectDir}/publish-maven.gradle"
+apply from: "${rootProject.projectDir}/gradle/publish-maven.gradle"
 
 publishing {
 	publications {
