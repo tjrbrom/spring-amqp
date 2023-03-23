@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2022 the original author or authors.
+ * Copyright 2002-2023 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -102,6 +102,28 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		CachingConnectionFactory ccf = new CachingConnectionFactory(connectionFactory);
 		ccf.setExecutor(mock(ExecutorService.class));
 		return ccf;
+	}
+
+	@Test
+	void stringRepresentation() {
+		CachingConnectionFactory ccf = new CachingConnectionFactory("someHost", 1234);
+		assertThat(ccf.toString()).contains(", host=someHost, port=1234")
+				.doesNotContain("addresses");
+		ccf.setAddresses("h1:1234,h2:1235");
+		assertThat(ccf.toString()).contains(", addresses=[h1:1234, h2:1235]")
+				.doesNotContain("host")
+				.doesNotContain("port");
+		ccf.setAddressResolver(() -> List.of(new Address("h3", 1236), new Address("h4", 1237)));
+		assertThat(ccf.toString()).contains(", addresses=[h3:1236, h4:1237]")
+				.doesNotContain("host")
+				.doesNotContain("port");
+		ccf.setAddressResolver(() ->  {
+			throw new IOException("test");
+		});
+		ccf.setPort(0);
+		assertThat(ccf.toString()).contains(", host=AddressResolver threw exception: test")
+				.doesNotContain("addresses")
+				.doesNotContain("port");
 	}
 
 	@Test
@@ -1908,6 +1930,41 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		assertThat(TestUtils.getPropertyValue(con, "target", SimpleConnection.class).getDelegate())
 				.isEqualTo(mockConnection);
 		verify(mockConnectionFactory).newConnection(any(ExecutorService.class), eq(resolver), anyString());
+	}
+
+	@Test
+	void nullShutdownCause() {
+		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
+		AbstractConnectionFactory cf = createConnectionFactory(mockConnectionFactory);
+		AtomicBoolean connShutDown = new AtomicBoolean();
+		cf.addConnectionListener(new ConnectionListener() {
+
+			@Override
+			public void onCreate(Connection connection) {
+			}
+
+			@Override
+			public void onShutDown(ShutdownSignalException signal) {
+				connShutDown.set(true);
+			}
+
+		});
+		AtomicBoolean chanShutDown = new AtomicBoolean();
+		cf.addChannelListener(new ChannelListener() {
+
+			@Override
+			public void onCreate(Channel channel, boolean transactional) {
+			}
+
+			@Override
+			public void onShutDown(ShutdownSignalException signal) {
+				chanShutDown.set(true);
+			}
+
+		});
+		cf.shutdownCompleted(new ShutdownSignalException(false, false, null, chanShutDown));
+		assertThat(connShutDown.get()).isTrue();
+		assertThat(chanShutDown.get()).isFalse();
 	}
 
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2022 the original author or authors.
+ * Copyright 2002-2023 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -55,6 +55,7 @@ import org.springframework.util.StringUtils;
 import com.rabbitmq.client.Address;
 import com.rabbitmq.client.AddressResolver;
 import com.rabbitmq.client.BlockedListener;
+import com.rabbitmq.client.Method;
 import com.rabbitmq.client.Recoverable;
 import com.rabbitmq.client.RecoveryListener;
 import com.rabbitmq.client.ShutdownListener;
@@ -303,6 +304,7 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 	}
 
 	@Override
+	@Nullable
 	public String getHost() {
 		return this.rabbitConnectionFactory.getHost();
 	}
@@ -352,6 +354,11 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 		this.logger.info("setAddresses() called with an empty value, will be using the host+port "
 				+ " or addressResolver properties for connections");
 		this.addresses = null;
+	}
+
+	@Nullable
+	protected synchronized List<Address> getAddresses() throws IOException {
+		return this.addressResolver != null ? this.addressResolver.getAddresses() : this.addresses;
 	}
 
 	/**
@@ -654,7 +661,11 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 
 	@Override
 	public void shutdownCompleted(ShutdownSignalException cause) {
-		int protocolClassId = cause.getReason().protocolClassId();
+		Method reason = cause.getReason();
+		int protocolClassId = RabbitUtils.CONNECTION_PROTOCOL_CLASS_ID_10;
+		if (reason != null) {
+			protocolClassId = reason.protocolClassId();
+		}
 		if (protocolClassId == RabbitUtils.CHANNEL_PROTOCOL_CLASS_ID_20) {
 			this.closeExceptionLogger.log(this.logger, "Shutdown Signal", cause);
 			getChannelListener().onShutDown(cause);
@@ -662,7 +673,6 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 		else if (protocolClassId == RabbitUtils.CONNECTION_PROTOCOL_CLASS_ID_10) {
 			getConnectionListener().onShutDown(cause);
 		}
-
 	}
 
 	@Override
