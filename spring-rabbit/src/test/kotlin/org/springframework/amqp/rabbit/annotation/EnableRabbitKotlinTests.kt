@@ -1,5 +1,5 @@
 /*
- * Copyright 2018-2021 the original author or authors.
+ * Copyright 2018-2023 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import assertk.assertThat
 import assertk.assertions.isEqualTo
 import assertk.assertions.isTrue
 import org.junit.jupiter.api.Test
+import org.springframework.amqp.core.AcknowledgeMode
 import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory
 import org.springframework.amqp.rabbit.core.RabbitTemplate
@@ -56,14 +57,14 @@ class EnableRabbitKotlinTests {
 	private lateinit var config: Config
 
 	@Test
-	fun `send and wait for consume` () {
+	fun `send and wait for consume`() {
 		val template = RabbitTemplate(this.config.cf())
 		template.convertAndSend("kotlinQueue", "test")
 		assertThat(this.config.latch.await(10, TimeUnit.SECONDS)).isTrue();
 	}
 
 	@Test
-	fun `send and wait for consume with EH` () {
+	fun `send and wait for consume with EH`() {
 		val template = RabbitTemplate(this.config.cf())
 		template.convertAndSend("kotlinQueue1", "test")
 		assertThat(this.config.ehLatch.await(10, TimeUnit.SECONDS)).isTrue();
@@ -78,27 +79,22 @@ class EnableRabbitKotlinTests {
 		val latch = CountDownLatch(1)
 
 		@RabbitListener(queues = ["kotlinQueue"])
-		fun handle(@Suppress("UNUSED_PARAMETER") data: String) {
+		suspend fun handle(@Suppress("UNUSED_PARAMETER") data: String) {
 			this.latch.countDown()
 		}
 
 		@Bean
-		fun rabbitListenerContainerFactory(cf: CachingConnectionFactory): SimpleRabbitListenerContainerFactory {
-			val factory = SimpleRabbitListenerContainerFactory()
-			factory.setConnectionFactory(cf)
-			return factory
-		}
+		fun rabbitListenerContainerFactory(cf: CachingConnectionFactory) =
+				SimpleRabbitListenerContainerFactory().also {
+					it.setAcknowledgeMode(AcknowledgeMode.MANUAL)
+					it.setConnectionFactory(cf)
+				}
 
 		@Bean
-		fun cf(): CachingConnectionFactory {
-			return CachingConnectionFactory(
-					RabbitAvailableCondition.getBrokerRunning().connectionFactory)
-		}
+		fun cf() = CachingConnectionFactory(RabbitAvailableCondition.getBrokerRunning().connectionFactory)
 
 		@Bean
-		fun multi(): Multi {
-			return Multi()
-		}
+		fun multi() = Multi()
 
 		@Bean
 		fun proxyListenerPostProcessor(): BeanPostProcessor? {
@@ -130,7 +126,7 @@ class EnableRabbitKotlinTests {
 	open class Multi {
 
 		@RabbitHandler
-		fun handle(@Suppress("UNUSED_PARAMETER") data: String) {
+		suspend fun handle(@Suppress("UNUSED_PARAMETER") data: String) {
 			throw RuntimeException("fail")
 		}
 

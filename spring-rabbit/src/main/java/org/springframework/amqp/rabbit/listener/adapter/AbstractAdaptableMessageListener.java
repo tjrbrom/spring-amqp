@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 the original author or authors.
+ * Copyright 2014-2023 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -364,7 +364,7 @@ public abstract class AbstractAdaptableMessageListener implements ChannelAwareMe
 	 * response message back.
 	 * @param resultArg the result object to handle (never <code>null</code>)
 	 * @param request the original request message
-	 * @param channel the Rabbit channel to operate on (may be <code>null</code>)
+	 * @param channel the Rabbit channel to operate on (maybe <code>null</code>)
 	 * @param source the source data for the method invocation - e.g.
 	 * {@code o.s.messaging.Message<?>}; may be null
 	 * @see #buildMessage
@@ -385,18 +385,18 @@ public abstract class AbstractAdaptableMessageListener implements ChannelAwareMe
 							basicAck(request, channel);
 						}
 						else {
-							asyncFailure(request, channel, t);
+							asyncFailure(request, channel, t, source);
 						}
 				});
 			}
 			else if (monoPresent && MonoHandler.isMono(resultArg.getReturnValue())) {
 				if (!this.isManualAck) {
-					this.logger.warn("Container AcknowledgeMode must be MANUAL for a Mono<?> return type; "
-							+ "otherwise the container will ack the message immediately");
+					this.logger.warn("Container AcknowledgeMode must be MANUAL for a Mono<?> return type" +
+							"(or Kotlin suspend function); otherwise the container will ack the message immediately");
 				}
 				MonoHandler.subscribe(resultArg.getReturnValue(),
 						r -> asyncSuccess(resultArg, request, channel, source, r),
-						t -> asyncFailure(request, channel, t),
+						t -> asyncFailure(request, channel, t, source),
 						() -> basicAck(request, channel));
 			}
 			else {
@@ -447,8 +447,8 @@ public abstract class AbstractAdaptableMessageListener implements ChannelAwareMe
 		}
 	}
 
-	private void asyncFailure(Message request, Channel channel, Throwable t) {
-		this.logger.error("Future or Mono was completed with an exception for " + request, t);
+	protected void asyncFailure(Message request, Channel channel, Throwable t, Object source) {
+		this.logger.error("Future, Mono, or suspend function was completed with an exception for " + request, t);
 		try {
 			channel.basicNack(request.getMessageProperties().getDeliveryTag(), false,
 					ContainerUtils.shouldRequeue(this.defaultRequeueRejected, t, this.logger));

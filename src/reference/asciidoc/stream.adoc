@@ -28,8 +28,38 @@ compile 'org.springframework.amqp:spring-rabbit-stream:{project-version}'
 ----
 ====
 
-Provision the queues as normal, using a `RabbitAdmin` bean, using the `QueueBuilder.stream()` method to designate the queue type.
-See <<stream-examples>>.
+You can provision the queues as normal, using a `RabbitAdmin` bean, using the `QueueBuilder.stream()` method to designate the queue type.
+For example:
+
+====
+[source, java]
+----
+@Bean
+Queue stream() {
+    return QueueBuilder.durable("stream.queue1")
+            .stream()
+            .build();    
+}
+----
+====
+
+However, this will only work if you are also using non-stream components (such as the `SimpleMessageListenerContainer` or `DirectMessageListenerContainer`) because the admin is triggered to declare the defined beans when an AMQP connection is opened.
+If your application only uses stream components, or you wish to use advanced stream configuration features, you should configure a `StreamAdmin` instead:
+
+====
+[source, java]
+----
+@Bean
+StreamAdmin streamAdmin(Environment env) {
+    return new StreamAdmin(env, sc -> {
+        sc.stream("stream.queue1").maxAge(Duration.ofHours(2)).create();
+        sc.stream("stream.queue2").create();
+    });
+}
+----
+====
+
+Refer to the RabbitMQ documentation for more information about the `StreamCreator`.
 
 ==== Sending Messages
 
@@ -41,13 +71,13 @@ The `RabbitStreamTemplate` provides a subset of the `RabbitTemplate` (AMQP) func
 ----
 public interface RabbitStreamOperations extends AutoCloseable {
 
-	ConvertableFuture<Boolean> send(Message message);
+	CompletableFuture<Boolean> send(Message message);
 
-	ConvertableFuture<Boolean> convertAndSend(Object message);
+	CompletableFuture<Boolean> convertAndSend(Object message);
 
-	ConvertableFuture<Boolean> convertAndSend(Object message, @Nullable MessagePostProcessor mpp);
+	CompletableFuture<Boolean> convertAndSend(Object message, @Nullable MessagePostProcessor mpp);
 
-	ConvertableFuture<Boolean> send(com.rabbitmq.stream.Message message);
+	CompletableFuture<Boolean> send(com.rabbitmq.stream.Message message);
 
 	MessageBuilder messageBuilder();
 
@@ -280,3 +310,22 @@ StreamListenerContainer container(Environment env, String name) {
 
 IMPORTANT: At this time, when the concurrency is greater than 1, the actual concurrency is further controlled by the `Environment`; to achieve full concurrency, set the environment's `maxConsumersByConnection` to 1.
 See https://rabbitmq.github.io/rabbitmq-stream-java-client/snapshot/htmlsingle/#configuring-the-environment[Configuring the Environment].
+
+[[stream-micrometer-observation]]
+==== Micrometer Observation
+
+Using Micrometer for observation is now supported, since version 3.0.5, for the `RabbitStreamTemplate` and the stream listener container.
+The container now also supports Micrometer timers (when observation is not enabled).
+
+Set `observationEnabled` on each component to enable observation; this will disable <<micrometer,Micrometer Timers>> because the timers will now be managed with each observation.
+When using annotated listeners, set `observationEnabled` on the container factory.
+
+Refer to https://micrometer.io/docs/tracing[Micrometer Tracing] for more information.
+
+To add tags to timers/traces, configure a custom `RabbitStreamTemplateObservationConvention` or `RabbitStreamListenerObservationConvention` to the template or listener container, respectively.
+
+The default implementations add the `name` tag for template observations and `listener.id` tag for containers.
+
+You can either subclass `DefaultRabbitStreamTemplateObservationConvention` or `DefaultStreamRabbitListenerObservationConvention` or provide completely new implementations.
+
+See <<observation-gen>> for more details.
