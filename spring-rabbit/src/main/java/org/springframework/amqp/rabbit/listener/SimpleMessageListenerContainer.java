@@ -16,7 +16,6 @@
 
 package org.springframework.amqp.rabbit.listener;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -57,6 +56,7 @@ import org.springframework.amqp.rabbit.support.ListenerContainerAware;
 import org.springframework.amqp.rabbit.support.ListenerExecutionFailedException;
 import org.springframework.amqp.rabbit.support.RabbitExceptionTranslator;
 import org.springframework.amqp.support.ConsumerTagStrategy;
+import org.springframework.core.log.LogMessage;
 import org.springframework.jmx.export.annotation.ManagedMetric;
 import org.springframework.jmx.support.MetricType;
 import org.springframework.lang.Nullable;
@@ -607,19 +607,7 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 	}
 
 	@Override
-	protected void doShutdown() {
-		shutdownAndWaitOrCallback(null);
-	}
-
-	@Override
-	public void stop(Runnable callback) {
-		shutdownAndWaitOrCallback(() -> {
-			setNotRunning();
-			callback.run();
-		});
-	}
-
-	private void shutdownAndWaitOrCallback(@Nullable Runnable callback) {
+	protected void shutdownAndWaitOrCallback(@Nullable Runnable callback) {
 		Thread thread = this.containerStoppingForAbort.get();
 		if (thread != null && !thread.equals(Thread.currentThread())) {
 			logger.info("Shutdown ignored - container is stopping due to an aborted consumer");
@@ -631,9 +619,14 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 		synchronized (this.consumersMonitor) {
 			if (this.consumers != null) {
 				Iterator<BlockingQueueConsumer> consumerIterator = this.consumers.iterator();
+				if (isForceStop()) {
+					this.stopNow.set(true);
+				}
 				while (consumerIterator.hasNext()) {
 					BlockingQueueConsumer consumer = consumerIterator.next();
-					consumer.basicCancel(true);
+					if (!isForceStop()) {
+						consumer.basicCancel(true);
+					}
 					canceledConsumers.add(consumer);
 					consumerIterator.remove();
 					if (consumer.declaring) {
@@ -657,7 +650,7 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 				}
 				else {
 					logger.info("Workers not finished.");
-					if (isForceCloseChannel()) {
+					if (isForceCloseChannel() || this.stopNow.get()) {
 						canceledConsumers.forEach(consumer -> {
 							if (logger.isWarnEnabled()) {
 								logger.warn("Closing channel for unresponsive consumer: " + consumer);
@@ -676,7 +669,7 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 				this.consumers = null;
 				this.cancellationLock.deactivate();
 			}
-
+			this.stopNow.set(false);
 			runCallbackIfNotNull(callback);
 		};
 		if (callback == null) {
@@ -1172,6 +1165,8 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 
 		private int consecutiveMessages;
 
+		private boolean failedExclusive;
+
 
 		AsyncMessageProcessingConsumer(BlockingQueueConsumer consumer) {
 			this.consumer = consumer;
@@ -1283,8 +1278,8 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 				}
 			}
 			catch (AmqpIOException e) {
-				if (e.getCause() instanceof IOException && e.getCause().getCause() instanceof ShutdownSignalException
-						&& e.getCause().getCause().getMessage().contains("in exclusive use")) {
+				if (RabbitUtils.exclusiveAccesssRefused(e)) {
+					this.failedExclusive = true;
 					getExclusiveConsumerExceptionLogger().log(logger,
 							"Exclusive consumer failure", e.getCause().getCause());
 					publishConsumerFailedEvent("Consumer raised exception, attempting restart", false, e);
@@ -1323,6 +1318,10 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 
 		private void mainLoop() throws Exception { // NOSONAR Exception
 			try {
+				if (SimpleMessageListenerContainer.this.stopNow.get()) {
+					this.consumer.forceCloseAndClearQueue();
+					return;
+				}
 				boolean receivedOk = receiveAndExecute(this.consumer); // At least one message received
 				if (SimpleMessageListenerContainer.this.maxConcurrentConsumers != null) {
 					checkAdjust(receivedOk);
@@ -1463,7 +1462,13 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 				}
 			}
 			else {
-				logger.info("Restarting " + this.consumer);
+				LogMessage restartMessage = LogMessage.of(() -> "Restarting " + this.consumer);
+				if (this.failedExclusive) {
+					getExclusiveConsumerExceptionLogger().logRestart(logger, restartMessage);
+				}
+				else {
+					logger.info(restartMessage);
+				}
 				restart(this.consumer);
 			}
 		}

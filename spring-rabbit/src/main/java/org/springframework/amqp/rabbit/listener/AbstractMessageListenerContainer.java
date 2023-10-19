@@ -91,7 +91,6 @@ import org.springframework.util.backoff.BackOff;
 import org.springframework.util.backoff.FixedBackOff;
 
 import com.rabbitmq.client.Channel;
-import com.rabbitmq.client.ShutdownSignalException;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
 
@@ -136,9 +135,11 @@ public abstract class AbstractMessageListenerContainer extends ObservableListene
 
 	private final Map<String, Object> consumerArgs = new HashMap<>();
 
-	private ContainerDelegate proxy = this.delegate;
-
 	private final AtomicBoolean logDeclarationException = new AtomicBoolean(true);
+
+	protected final AtomicBoolean stopNow = new AtomicBoolean(); // NOSONAR
+
+	private ContainerDelegate proxy = this.delegate;
 
 	private long shutdownTimeout = DEFAULT_SHUTDOWN_TIMEOUT;
 
@@ -244,6 +245,8 @@ public abstract class AbstractMessageListenerContainer extends ObservableListene
 
 	@Nullable
 	private RabbitListenerObservationConvention observationConvention;
+
+	private boolean forceStop;
 
 	@Override
 	public void setApplicationEventPublisher(ApplicationEventPublisher applicationEventPublisher) {
@@ -1026,7 +1029,7 @@ public abstract class AbstractMessageListenerContainer extends ObservableListene
 
 	/**
 	 * Set a {@link ConditionalExceptionLogger} for logging exclusive consumer failures. The
-	 * default is to log such failures at WARN level.
+	 * default is to log such failures at DEBUG level (since 3.1, previously WARN).
 	 * @param exclusiveConsumerExceptionLogger the conditional exception logger.
 	 * @since 1.5
 	 */
@@ -1154,6 +1157,25 @@ public abstract class AbstractMessageListenerContainer extends ObservableListene
 	}
 
 	/**
+	 * Stop container after current message(s) are processed and requeue any prefetched.
+	 * @return true to stop when current message(s) are processed.
+	 * @since 2.4.14
+	 */
+	protected boolean isForceStop() {
+		return this.forceStop;
+	}
+
+	/**
+	 * Set to true to stop the container after the current message(s) are processed and
+	 * requeue any prefetched. Useful when using exclusive or single-active consumers.
+	 * @param forceStop true to stop when current messsage(s) are processed.
+	 * @since 2.4.14
+	 */
+	public void setForceStop(boolean forceStop) {
+		this.forceStop = forceStop;
+	}
+
+	/**
 	 * Delegates to {@link #validateConfiguration()} and {@link #initialize()}.
 	 */
 	@Override
@@ -1253,13 +1275,26 @@ public abstract class AbstractMessageListenerContainer extends ObservableListene
 	}
 
 	/**
-	 * Stop the shared Connection, call {@link #doShutdown()}, and close this container.
+	 * Stop the shared Connection, call {@link #shutdown(Runnable)}, and close this
+	 * container.
 	 */
 	public void shutdown() {
+		shutdown(null);
+	}
+
+	/**
+	 * Stop the shared Connection, call {@link #shutdownAndWaitOrCallback(Runnable)}, and
+	 * close this container.
+	 * @param callback an optional {@link Runnable} to call when the stop is complete.
+	 */
+	public void shutdown(@Nullable Runnable callback) {
 		synchronized (this.lifecycleMonitor) {
 			if (!isActive()) {
 				logger.debug("Shutdown ignored - container is not active already");
 				this.lifecycleMonitor.notifyAll();
+				if (callback != null) {
+					callback.run();
+				}
 				return;
 			}
 			this.active = false;
@@ -1270,7 +1305,7 @@ public abstract class AbstractMessageListenerContainer extends ObservableListene
 
 		// Shut down the invokers.
 		try {
-			doShutdown();
+			shutdownAndWaitOrCallback(callback);
 		}
 		catch (Exception ex) {
 			throw convertRabbitAccessException(ex);
@@ -1302,7 +1337,18 @@ public abstract class AbstractMessageListenerContainer extends ObservableListene
 	 * A shared Rabbit Connection, if any, will automatically be closed <i>afterwards</i>.
 	 * @see #shutdown()
 	 */
-	protected abstract void doShutdown();
+	protected void doShutdown() {
+		shutdownAndWaitOrCallback(null);
+	}
+
+	@Override
+	public void stop(Runnable callback) {
+		shutdown(callback);
+	}
+
+	protected void shutdownAndWaitOrCallback(@Nullable Runnable callback) {
+	}
+
 
 	/**
 	 * @return Whether this container is currently active, that is, whether it has been set up but not shut down yet.
@@ -1880,8 +1926,7 @@ public abstract class AbstractMessageListenerContainer extends ObservableListene
 					context.getBeansOfType(Queue.class, false, false).values());
 			Map<String, Declarables> declarables = context.getBeansOfType(Declarables.class, false, false);
 			declarables.values().forEach(dec -> queues.addAll(dec.getDeclarablesByType(Queue.class)));
-			admin.getManualDeclarables()
-					.values()
+			admin.getManualDeclarableSet()
 					.stream()
 					.filter(Queue.class::isInstance)
 					.map(Queue.class::cast)
@@ -2049,27 +2094,12 @@ public abstract class AbstractMessageListenerContainer extends ObservableListene
 	 * consumer failures.
 	 * @since 1.5
 	 */
-	private static class DefaultExclusiveConsumerLogger implements ConditionalExceptionLogger {
-
-		DefaultExclusiveConsumerLogger() {
-		}
+	public static class DefaultExclusiveConsumerLogger implements ConditionalExceptionLogger {
 
 		@Override
-		public void log(Log logger, String message, Throwable t) {
-			if (t instanceof ShutdownSignalException cause) {
-				if (RabbitUtils.isExclusiveUseChannelClose(cause)) {
-					if (logger.isWarnEnabled()) {
-						logger.warn(message + ": " + cause.toString());
-					}
-				}
-				else if (!RabbitUtils.isNormalChannelClose(cause)) {
-					logger.error(message + ": " + cause.getMessage());
-				}
-			}
-			else {
-				if (logger.isErrorEnabled()) {
-					logger.error("Unexpected invocation of " + getClass() + ", with message: " + message, t);
-				}
+		public void log(Log logger, String message, Throwable cause) {
+			if (logger.isDebugEnabled()) {
+				logger.debug(message + ": " + cause.toString());
 			}
 		}
 

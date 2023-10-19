@@ -50,6 +50,7 @@ import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.AmqpTimeoutException;
 import org.springframework.amqp.rabbit.support.ActiveObjectCounter;
 import org.springframework.beans.factory.InitializingBean;
+import org.springframework.context.SmartLifecycle;
 import org.springframework.jmx.export.annotation.ManagedAttribute;
 import org.springframework.jmx.export.annotation.ManagedResource;
 import org.springframework.lang.Nullable;
@@ -83,7 +84,7 @@ import com.rabbitmq.client.impl.recovery.AutorecoveringChannel;
  * <p>
  * <b>{@link CacheMode#CONNECTION} is not compatible with a Rabbit Admin that auto-declares queues etc.</b>
  * <p>
- * <b>NOTE: This ConnectionFactory requires explicit closing of all Channels obtained form its Connection(s).</b>
+ * <b>NOTE: This ConnectionFactory requires explicit closing of all Channels obtained from its Connection(s).</b>
  * This is the usual recommendation for native Rabbit access code anyway. However, with this ConnectionFactory, its use
  * is mandatory in order to actually allow for Channel reuse. {@link Channel#close()} returns the channel to the
  * cache, if there is room, or physically closes the channel otherwise.
@@ -99,7 +100,7 @@ import com.rabbitmq.client.impl.recovery.AutorecoveringChannel;
  */
 @ManagedResource
 public class CachingConnectionFactory extends AbstractConnectionFactory
-		implements InitializingBean, ShutdownListener {
+		implements InitializingBean, ShutdownListener, SmartLifecycle {
 
 	private static final String UNUSED = "unused";
 
@@ -189,6 +190,8 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 	private final Object connectionMonitor = new Object();
 
 	private final ActiveObjectCounter<Channel> inFlightAsyncCloses = new ActiveObjectCounter<>();
+
+	private final AtomicBoolean running = new AtomicBoolean();
 
 	private long channelCheckoutTimeout = 0;
 
@@ -447,6 +450,11 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 	}
 
 	@Override
+	public int getPhase() {
+		return Integer.MIN_VALUE;
+	}
+
+	@Override
 	public void afterPropertiesSet() {
 		this.initialized = true;
 		if (this.cacheMode == CacheMode.CHANNEL) {
@@ -457,6 +465,22 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 		if (this.defaultPublisherFactory) {
 			((CachingConnectionFactory) getPublisherConnectionFactory()).afterPropertiesSet(); // NOSONAR
 		}
+	}
+
+	@Override
+	public void start() {
+		this.running.set(true);
+	}
+
+	@Override
+	public void stop() {
+		this.running.set(false);
+		resetConnection();
+	}
+
+	@Override
+	public boolean isRunning() {
+		return this.running.get();
 	}
 
 	private void initCacheWaterMarks() {
@@ -822,18 +846,24 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 		resetConnection();
 		if (getContextStopped()) {
 			this.stopped = true;
-			if (this.channelsExecutor != null) {
-				try {
-					if (!this.inFlightAsyncCloses.await(CHANNEL_EXEC_SHUTDOWN_TIMEOUT, TimeUnit.SECONDS)) {
-						this.logger.warn("Async closes are still in-flight: " + this.inFlightAsyncCloses.getCount());
+			synchronized (this.connectionMonitor) {
+				if (this.channelsExecutor != null) {
+					try {
+						if (!this.inFlightAsyncCloses.await(CHANNEL_EXEC_SHUTDOWN_TIMEOUT, TimeUnit.SECONDS)) {
+							this.logger
+									.warn("Async closes are still in-flight: " + this.inFlightAsyncCloses.getCount());
+						}
+						this.channelsExecutor.shutdown();
+						if (!this.channelsExecutor.awaitTermination(CHANNEL_EXEC_SHUTDOWN_TIMEOUT, TimeUnit.SECONDS)) {
+							this.logger.warn("Channel executor failed to shut down");
+						}
 					}
-					this.channelsExecutor.shutdown();
-					if (!this.channelsExecutor.awaitTermination(CHANNEL_EXEC_SHUTDOWN_TIMEOUT, TimeUnit.SECONDS)) {
-						this.logger.warn("Channel executor failed to shut down");
+					catch (@SuppressWarnings(UNUSED) InterruptedException e) {
+						Thread.currentThread().interrupt();
 					}
-				}
-				catch (@SuppressWarnings(UNUSED) InterruptedException e) {
-					Thread.currentThread().interrupt();
+					finally {
+						this.channelsExecutor = null;
+					}
 				}
 			}
 		}

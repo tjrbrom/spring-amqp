@@ -1,64 +1,17 @@
 [[whats-new]]
 == What's New
 
-=== Changes in 3.0 Since 2.4
+=== Changes in 3.1 Since 3.0
 
-==== Java 17, Spring Framework 6.0
+==== Java 17, Spring Framework 6.1
 
-This version requires Spring Framework 6.0 and Java 17
+This version requires Spring Framework 6.1 and Java 17.
 
-==== Remoting
+[[31-exc]]
+==== Exclusive Consumer Logging
 
-The remoting feature (using RMI) is no longer supported.
-
-==== Observation
-
-Enabling observation for timers and tracing using Micrometer is now supported.
-See <<micrometer-observation>> for more information.
-
-[[x30-Native]]
-==== Native Images
-
-Support for creating native images is provided.
-See <<native-images>> for more information.
-
-==== AsyncRabbitTemplate
-
-IMPORTANT: The `AsyncRabbitTemplate` now returns `CompletableFuture` s instead of `ListenableFuture` s.
-See <<async-template>> for more information.
-
-==== Stream Support Changes
-
-IMPORTANT: `RabbitStreamOperations` and `RabbitStreamTemplate` methods now return `CompletableFuture` instead of `ListenableFuture`.
-
-Super streams and single active consumers thereon are now supported.
-
-See <<stream-support>> for more information.
-
-==== `@RabbitListener` Changes
-
-Batch listeners can now consume `Collection<?>` as well as `List<?>`.
-The batch messaging adapter now ensures that the method is suitable for consuming batches.
-When setting the container factory `consumerBatchEnabled` to `true`, the `batchListener` property is also set to `true`.
-See <<receiving-batch>> for more information.
-
-`MessageConverter` s can now return `Optional.empty()` for a null value; this is currently implemented by the `Jackson2JsonMessageConverter`.
-See <<Jackson2JsonMessageConverter-from-message>> for more information
-
-You can now configure a `ReplyPostProcessor` via the container factory rather than via a property on `@RabbitListener`.
-See <<async-annotation-driven-reply>> for more information.
-
-The `@RabbitListener` (and `@RabbitHandler`) methods can now be declared as Kotlin `suspend` functions.
-See <<async-returns>> for more information.
-
-Starting with version 3.0.5, listeners with async return types (including Kotlin suspend functions) invoke the `RabbitListenerErrorHandler` (if configured) after a failure.
-Previously, the error handler was only invoked with synchronous invocations.
-
-==== Connection Factory Changes
-
-The default `addressShuffleMode` in `AbstractConnectionFactory` is now `RANDOM`.
-This results in connecting to a random host when multiple addresses are provided.
-See <<cluster>> for more information.
-
-The `LocalizedQueueConnectionFactory` no longer uses the RabbitMQ `http-client` library to determine which node is the leader for a queue.
-See <<queue-affinity>> for more information.
+Log messages reporting access refusal due to exclusive consumers are now logged at DEBUG level by default.
+It remains possible to configure your own logging behavior by setting the `exclusiveConsumerExceptionLogger` and `closeExceptionLogger` properties on the listener container and connection factory respectively.
+In addition, the `SimpleMessageListenerContainer` consumer restart after such an exception is now logged at DEBUG level by default (previously INFO).
+A new method `logRestart()` has been added to the `ConditionalExceptionLogger` to allow this to be changed.
+See <<consumer-events>> and <<channel-close-logging>> for more information.

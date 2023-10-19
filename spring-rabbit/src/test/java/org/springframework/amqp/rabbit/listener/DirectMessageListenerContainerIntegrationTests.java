@@ -28,6 +28,7 @@ import static org.mockito.BDDMockito.willAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
+import java.net.UnknownHostException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -51,6 +52,7 @@ import org.springframework.amqp.AmqpAuthenticationException;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageListener;
 import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.core.QueueInformation;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.Connection;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
@@ -90,6 +92,7 @@ import com.rabbitmq.client.Consumer;
  */
 @RabbitAvailable(queues = { DirectMessageListenerContainerIntegrationTests.Q1,
 		DirectMessageListenerContainerIntegrationTests.Q2,
+		DirectMessageListenerContainerIntegrationTests.Q3,
 		DirectMessageListenerContainerIntegrationTests.EQ1,
 		DirectMessageListenerContainerIntegrationTests.EQ2,
 		DirectMessageListenerContainerIntegrationTests.DLQ1 })
@@ -101,6 +104,8 @@ public class DirectMessageListenerContainerIntegrationTests {
 	public static final String Q1 = "testQ1.DirectMessageListenerContainerIntegrationTests";
 
 	public static final String Q2 = "testQ2.DirectMessageListenerContainerIntegrationTests";
+
+	public static final String Q3 = "testQ3.DirectMessageListenerContainerIntegrationTests";
 
 	public static final String EQ1 = "eventTestQ1.DirectMessageListenerContainerIntegrationTests";
 
@@ -180,6 +185,9 @@ public class DirectMessageListenerContainerIntegrationTests {
 	@Test
 	public void testBadHost() throws InterruptedException {
 		CachingConnectionFactory cf = new CachingConnectionFactory("this.host.does.not.exist");
+		cf.setAddressResolver(() -> {
+			throw new UnknownHostException("Test Unknown Host");
+		});
 		ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
 		executor.setThreadNamePrefix("client-");
 		executor.afterPropertiesSet();
@@ -790,6 +798,56 @@ public class DirectMessageListenerContainerIntegrationTests {
 		assertThat(ackSuccess.get()).isFalse();
 		assertThat(ackCause.get().getMessage()).isEqualTo("Channel closed; cannot ack/nack");
 		assertThat(ackDeliveryTag.get()).isEqualTo(1);
+	}
+
+	@Test
+	void forceStop() throws InterruptedException {
+		CountDownLatch latch1 = new CountDownLatch(1);
+		CachingConnectionFactory cf = new CachingConnectionFactory("localhost");
+		DirectMessageListenerContainer container = new DirectMessageListenerContainer(cf);
+		container.setMessageListener((ChannelAwareMessageListener) (msg, chan) -> {
+			latch1.await(10, TimeUnit.SECONDS);
+		});
+		RabbitTemplate template = new RabbitTemplate(cf);
+		try {
+			container.setQueueNames(Q3);
+			container.setForceStop(true);
+			container.setShutdownTimeout(20_000L);
+			template.convertAndSend(Q3, "one");
+			template.convertAndSend(Q3, "two");
+			template.convertAndSend(Q3, "three");
+			template.convertAndSend(Q3, "four");
+			template.convertAndSend(Q3, "five");
+			await().untilAsserted(() -> {
+				QueueInformation queueInfo = admin.getQueueInfo(Q3);
+				assertThat(queueInfo).isNotNull();
+				assertThat(queueInfo.getMessageCount()).isEqualTo(5);
+			});
+			container.start();
+			await().untilAsserted(() -> {
+				QueueInformation queueInfo = admin.getQueueInfo(Q3);
+				assertThat(queueInfo).isNotNull();
+				assertThat(queueInfo.getMessageCount()).isEqualTo(0);
+			});
+			CountDownLatch latch2 = new CountDownLatch(1);
+			long t1 = System.currentTimeMillis();
+			container.stop(() -> {
+				latch2.countDown();
+			});
+			latch1.countDown();
+			assertThat(System.currentTimeMillis() - t1).isLessThan(5_000L);
+			await().untilAsserted(() -> {
+				QueueInformation queueInfo = admin.getQueueInfo(Q3);
+				assertThat(queueInfo).isNotNull();
+				assertThat(queueInfo.getMessageCount()).isEqualTo(4);
+			});
+			assertThat(latch2.await(10, TimeUnit.SECONDS)).isTrue();
+			assertThat(container.isActive()).isFalse();
+			assertThat(container.isRunning()).isFalse();
+		}
+		finally {
+			container.stop();
+		}
 	}
 
 	@Test

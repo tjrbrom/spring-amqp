@@ -213,9 +213,10 @@ There are three connection factories to chose from
 
 The first two were added in version 2.3.
 
-For most use cases, the `PooledChannelConnectionFactory` should be used.
+For most use cases, the `CachingConnectionFactory` should be used.
 The `ThreadChannelConnectionFactory` can be used if you want to ensure strict message ordering without the need to use <<scoped-operations>>.
-The `CachingConnectionFactory` should be used if you want to use correlated publisher confirmations or if you wish to open multiple connections, via its `CacheMode`.
+The `PooledChannelConnectionFactory` is similar to the `CachingConnectionFactory` in that it uses a single connection and a pool of channels.
+It's implementation is simpler but it doesn't support correlated publisher confirmations.
 
 Simple publisher confirmations are supported by all three factories.
 
@@ -544,7 +545,40 @@ Previously, you had to configure the SSL options programmatically.
 The following example shows how to configure a `RabbitConnectionFactoryBean`:
 
 ====
-[source,xml]
+[source,java,role=primary]
+.Java
+----
+@Bean
+RabbitConnectionFactoryBean rabbitConnectionFactory() {
+    RabbitConnectionFactoryBean factoryBean = new RabbitConnectionFactoryBean();
+    factoryBean.setUseSSL(true);
+    factoryBean.setSslPropertiesLocation(new ClassPathResource("secrets/rabbitSSL.properties"));
+    return factoryBean;
+}
+
+@Bean
+CachingConnectionFactory connectionFactory(ConnectionFactory rabbitConnectionFactory) {
+    CachingConnectionFactory ccf = new CachingConnectionFactory(rabbitConnectionFactory);
+    ccf.setHost("...");
+    // ...
+    return ccf;
+}
+----
+[source,properties,role=secondary]
+.Boot application.properties
+----
+spring.rabbitmq.ssl.enabled:true
+spring.rabbitmq.ssl.keyStore=...
+spring.rabbitmq.ssl.keyStoreType=jks
+spring.rabbitmq.ssl.keyStorePassword=...
+spring.rabbitmq.ssl.trustStore=...
+spring.rabbitmq.ssl.trustStoreType=jks
+spring.rabbitmq.ssl.trustStorePassword=...
+spring.rabbitmq.host=...
+...
+----
+[source,xml,role=secondary]
+.XML
 ----
 <rabbit:connection-factory id="rabbitConnectionFactory"
     connection-factory="clientConnectionFactory"
@@ -556,7 +590,7 @@ The following example shows how to configure a `RabbitConnectionFactoryBean`:
 <bean id="clientConnectionFactory"
         class="org.springframework.amqp.rabbit.connection.RabbitConnectionFactoryBean">
     <property name="useSSL" value="true" />
-    <property name="sslPropertiesLocation" value="file:/secrets/rabbitSSL.properties"/>
+    <property name="sslPropertiesLocation" value="classpath:secrets/rabbitSSL.properties"/>
 </bean>
 ----
 ====
@@ -906,16 +940,18 @@ See <<publishing-is-async>> for one scenario where you might want to register a 
 
 Version 1.5 introduced a mechanism to enable users to control logging levels.
 
-The `CachingConnectionFactory` uses a default strategy to log channel closures as follows:
+The `AbstractConnectionFactory` uses a default strategy to log channel closures as follows:
 
 * Normal channel closes (200 OK) are not logged.
-* If a channel is closed due to a failed passive queue declaration, it is logged at debug level.
+* If a channel is closed due to a failed passive queue declaration, it is logged at DEBUG level.
 * If a channel is closed because the `basic.consume` is refused due to an exclusive consumer condition, it is logged at
-INFO level.
+DEBUG level (since 3.1, previously INFO).
 * All others are logged at ERROR level.
 
 To modify this behavior, you can inject a custom `ConditionalExceptionLogger` into the
 `CachingConnectionFactory` in its `closeExceptionLogger` property.
+
+Also, the `AbstractConnectionFactory.DefaultChannelCloseLogger` is now public, allowing it to be sub classed.
 
 See also <<consumer-events>>.
 
@@ -2330,8 +2366,13 @@ These events can be consumed by implementing `ApplicationListener<ListenerContai
 
 NOTE: System-wide events (such as connection failures) are published by all consumers when `concurrentConsumers` is greater than 1.
 
-If a consumer fails because one if its queues is being used exclusively, by default, as well as publishing the event, a `WARN` log is issued.
-To change this logging behavior, provide a custom `ConditionalExceptionLogger` in the `SimpleMessageListenerContainer` instance's `exclusiveConsumerExceptionLogger` property.
+If a consumer fails because one if its queues is being used exclusively, by default, as well as publishing the event, a `DEBUG` log is issued (since 3.1, previously WARN).
+To change this logging behavior, provide a custom `ConditionalExceptionLogger` in the `AbstractMessageListenerContainer` instance's `exclusiveConsumerExceptionLogger` property.
+In addition, the `SimpleMessageListenerContainer` consumer restart after such an exception is now logged at DEBUG level by default (previously INFO).
+A new method `logRestart()` has been added to the `ConditionalExceptionLogger` to allow this to be changed.
+
+Also, the `AbstractMessageListenerContainer.DefaultExclusiveConsumerLogger` is now public, allowing it to be sub classed.
+
 See also <<channel-close-logging>>.
 
 Fatal errors are always logged at the `ERROR` level.
@@ -3493,6 +3534,10 @@ Starting with version 1.5, you can now assign a `group` to the container on the 
 This provides a mechanism to get a reference to a subset of containers.
 Adding a `group` attribute causes a bean of type `Collection<MessageListenerContainer>` to be registered with the context with the group name.
 
+By default, stopping a container will cancel the consumer and process all prefetched messages before stopping.
+Starting with versions 2.4.14, 3.0.6, you can set the <<forceStop>> container property to true to stop immediately after the current message is processed, causing any prefetched messages to be requeued.
+This is useful, for example, if exclusive or single-active consumers are being used.
+
 [[receiving-batch]]
 ===== @RabbitListener with Batching
 
@@ -4369,7 +4414,7 @@ consider configuring which packages and classes are allowed to be deserialized.
 This applies to both the `SimpleMessageConverter` and `SerializerMessageConverter` when it is configured to use a
 `DefaultDeserializer` either implicitly or via configuration.
 
-By default, the allowed list is empty, meaning all classes are deserialized.
+By default, the allowed list is empty, meaning no classes will be deserialized.
 
 You can set a list of patterns, such as `thing1.*`, `thing1.thing2.Cat` or `*.MySafeClass`.
 
@@ -4377,6 +4422,7 @@ The patterns are checked in order until a match is found.
 If there is no match, a `SecurityException` is thrown.
 
 You can set the patterns using the `allowedListPatterns` property on these converters.
+Alternatively, if you trust all message originators, you can set the environment variable `SPRING_AMQP_DESERIALIZATION_TRUST_ALL` or system property `spring.amqp.deserialization.trust.all` to `true`.
 ====
 
 [[message-properties-converters]]
@@ -6170,6 +6216,18 @@ a|
 |If the consumers do not respond to a shutdown within `shutdownTimeout`, if this is `true`, the channel will be closed, causing any unacked messages to be requeued.
 Defaults to `true` since 2.0.
 You can set it to `false` to revert to the previous behavior.
+
+a|image::images/tickmark.png[]
+a|image::images/tickmark.png[]
+a|
+
+|[[forceStop]]<<forceStop,`forceStop`>> +
+(N/A)
+
+|Set to true to stop (when the container is stopped) after the current record is processed; causing all prefetched messages to be requeued.
+By default, the container will cancel the consumer and process all prefetched messages before stopping.
+Since versions 2.4.14, 3.0.6
+Defaults to `false`.
 
 a|image::images/tickmark.png[]
 a|image::images/tickmark.png[]

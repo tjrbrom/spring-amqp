@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2022 the original author or authors.
+ * Copyright 2016-2023 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -782,24 +782,22 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 
 	@Nullable
 	private SimpleConsumer handleConsumeException(String queue, int index, @Nullable SimpleConsumer consumerArg,
-			Exception e) {
+			Exception ex) {
 
 		SimpleConsumer consumer = consumerArg;
-		if (e.getCause() instanceof ShutdownSignalException
-				&& e.getCause().getMessage().contains("in exclusive use")) {
-			getExclusiveConsumerExceptionLogger().log(logger,
-					"Exclusive consumer failure", e.getCause());
-			publishConsumerFailedEvent("Consumer raised exception, attempting restart", false, e);
+		if (RabbitUtils.exclusiveAccesssRefused(ex)) {
+			getExclusiveConsumerExceptionLogger().log(logger, "Exclusive consumer failure", ex.getCause());
+			publishConsumerFailedEvent("Consumer raised exception, attempting restart", false, ex);
 		}
-		else if (e.getCause() instanceof ShutdownSignalException
-				&& RabbitUtils.isPassiveDeclarationChannelClose((ShutdownSignalException) e.getCause())) {
+		else if (ex.getCause() instanceof ShutdownSignalException
+				&& RabbitUtils.isPassiveDeclarationChannelClose((ShutdownSignalException) ex.getCause())) {
 			publishMissingQueueEvent(queue);
 			this.logger.error("Queue not present, scheduling consumer "
-					+ (consumer == null ? "for queue " + queue : consumer) + " for restart", e);
+					+ (consumer == null ? "for queue " + queue : consumer) + " for restart", ex);
 		}
 		else if (this.logger.isWarnEnabled()) {
 			this.logger.warn("basicConsume failed, scheduling consumer "
-					+ (consumer == null ? "for queue " + queue : consumer) + " for restart", e);
+					+ (consumer == null ? "for queue " + queue : consumer) + " for restart", ex);
 		}
 
 		if (consumer == null) {
@@ -813,7 +811,7 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 	}
 
 	@Override
-	protected void doShutdown() {
+	protected void shutdownAndWaitOrCallback(@Nullable Runnable callback) {
 		LinkedList<SimpleConsumer> canceledConsumers = null;
 		boolean waitForConsumers = false;
 		synchronized (this.consumersMonitor) {
@@ -826,33 +824,50 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 			}
 		}
 		if (waitForConsumers) {
-			try {
-				if (this.cancellationLock.await(getShutdownTimeout(), TimeUnit.MILLISECONDS)) {
-					this.logger.info("Successfully waited for consumers to finish.");
-				}
-				else {
-					this.logger.info("Consumers not finished.");
-					if (isForceCloseChannel()) {
-						canceledConsumers.forEach(consumer -> {
-							String eventMessage = "Closing channel for unresponsive consumer: " + consumer;
-							if (logger.isWarnEnabled()) {
-								logger.warn(eventMessage);
-							}
-							consumer.cancelConsumer(eventMessage);
-						});
+			LinkedList<SimpleConsumer> consumersToWait = canceledConsumers;
+			Runnable awaitShutdown = () -> {
+				try {
+					if (this.cancellationLock.await(getShutdownTimeout(), TimeUnit.MILLISECONDS)) {
+						this.logger.info("Successfully waited for consumers to finish.");
+					}
+					else {
+						this.logger.info("Consumers not finished.");
+						if (isForceCloseChannel() || this.stopNow.get()) {
+							consumersToWait.forEach(consumer -> {
+								String eventMessage = "Closing channel for unresponsive consumer: " + consumer;
+								if (logger.isWarnEnabled()) {
+									logger.warn(eventMessage);
+								}
+								consumer.cancelConsumer(eventMessage);
+							});
+						}
 					}
 				}
+				catch (InterruptedException e) {
+					Thread.currentThread().interrupt();
+					this.logger.warn("Interrupted waiting for consumers. Continuing with shutdown.");
+				}
+				finally {
+					this.startedLatch = new CountDownLatch(1);
+					this.started = false;
+					this.aborted = false;
+					this.hasStopped = true;
+				}
+				this.stopNow.set(false);
+				runCallbackIfNotNull(callback);
+			};
+			if (callback == null) {
+				awaitShutdown.run();
 			}
-			catch (InterruptedException e) {
-				Thread.currentThread().interrupt();
-				this.logger.warn("Interrupted waiting for consumers. Continuing with shutdown.");
+			else {
+				getTaskExecutor().execute(awaitShutdown);
 			}
-			finally {
-				this.startedLatch = new CountDownLatch(1);
-				this.started = false;
-				this.aborted = false;
-				this.hasStopped = true;
-			}
+		}
+	}
+
+	private void runCallbackIfNotNull(@Nullable Runnable callback) {
+		if (callback != null) {
+			callback.run();
 		}
 	}
 
@@ -863,7 +878,12 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 	private void actualShutDown(List<SimpleConsumer> consumers) {
 		Assert.state(getTaskExecutor() != null, "Cannot shut down if not initialized");
 		this.logger.debug("Shutting down");
-		consumers.forEach(this::cancelConsumer);
+		if (isForceStop()) {
+			this.stopNow.set(true);
+		}
+		else {
+			consumers.forEach(this::cancelConsumer);
+		}
 		this.consumers.clear();
 		this.consumersByQueue.clear();
 		this.logger.debug("All consumers canceled");
@@ -1031,6 +1051,10 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 		public void handleDelivery(String consumerTag, Envelope envelope,
 				BasicProperties properties, byte[] body) {
 
+			if (!getChannel().isOpen()) {
+				this.logger.debug("Discarding prefetch, channel closed");
+				return;
+			}
 			MessageProperties messageProperties =
 					getMessagePropertiesConverter().toMessageProperties(properties, envelope, "UTF-8");
 			messageProperties.setConsumerTag(consumerTag);
@@ -1071,6 +1095,9 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 				catch (Exception e) {
 					// NOSONAR
 				}
+			}
+			if (DirectMessageListenerContainer.this.stopNow.get()) {
+				closeChannel();
 			}
 		}
 
@@ -1308,11 +1335,15 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 		}
 
 		private void finalizeConsumer() {
+			closeChannel();
+			consumerRemoved(this);
+		}
+
+		private void closeChannel() {
 			RabbitUtils.setPhysicalCloseRequired(getChannel(), true);
 			RabbitUtils.closeChannel(getChannel());
 			RabbitUtils.closeConnection(this.connection);
 			DirectMessageListenerContainer.this.cancellationLock.release(this);
-			consumerRemoved(this);
 		}
 
 		@Override
