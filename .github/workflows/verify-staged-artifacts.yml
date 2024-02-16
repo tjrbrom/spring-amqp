@@ -11,34 +11,44 @@ on:
 jobs:
   verify-staged-with-samples:
     runs-on: ubuntu-latest
+
+    services:
+
+      rabbitmq:
+        image: rabbitmq:management
+        ports:
+          - 5672:5672
+          - 15672:15672
+
     steps:
 
       - name: Checkout Samples Repo
         uses: actions/checkout@v4
         with:
           repository: spring-projects/spring-amqp-samples
+          ref: ${{ github.ref_name }}
           show-progress: false
 
       - name: Set up JDK
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
           cache: 'maven'
 
-      - uses: jfrog/setup-jfrog-cli@v3
+      - uses: jfrog/setup-jfrog-cli@v4
         env:
           JF_ENV_SPRING: ${{ secrets.JF_ARTIFACTORY_SPRING }}
 
       - name: Configure JFrog Cli
-        run: jf mvnc --repo-resolve-releases=libs-spring-dataflow-private-staging-release --repo-resolve-snapshots=snapshot
+        run: jf mvnc --repo-resolve-releases=libs-release-staging --repo-resolve-snapshots=snapshot
 
       - name: Verify samples against staged release
         run: jf mvn verify -D"spring.amqp.version"=${{ inputs.releaseVersion }} -B -ntp
 
       - name: Capture Test Results
         if: failure()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: test-results
           path: '**/target/surefire-reports/**/*.*'
