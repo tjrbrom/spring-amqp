@@ -24,7 +24,7 @@ plugins {
 	id 'io.spring.dependency-management' version '1.1.4' apply false
 	id 'org.antora' version '1.0.0'
 	id 'io.spring.antora.generate-antora-yml' version '0.0.1'
-	id 'com.github.spotbugs' version '6.0.9'
+	id 'com.github.spotbugs' version '6.0.12'
 }
 
 description = 'Spring AMQP'
@@ -61,18 +61,18 @@ ext {
 	logbackVersion = '1.4.14'
 	lz4Version = '1.8.0'
 	micrometerDocsVersion = '1.0.2'
-	micrometerVersion = '1.12.4'
-	micrometerTracingVersion = '1.2.4'
+	micrometerVersion = '1.12.5'
+	micrometerTracingVersion = '1.2.5'
 	mockitoVersion = '5.6.0'
 	rabbitmqStreamVersion = '0.14.0'
 	rabbitmqVersion = '5.19.0'
-	reactorVersion = '2023.0.4'
+	reactorVersion = '2023.0.5'
 	snappyVersion = '1.1.10.5'
-	springDataVersion = '2023.1.4'
+	springDataVersion = '2023.1.5'
 	springRetryVersion = '2.0.5'
-	springVersion = '6.1.5'
+	springVersion = '6.1.6'
 	testcontainersVersion = '1.19.7'
-	zstdJniVersion = '1.5.5-11'
+	zstdJniVersion = '1.5.6-2'
 
 	javaProjects = subprojects - project(':spring-amqp-bom')
 }
