@@ -1,5 +1,5 @@
 buildscript {
-	ext.kotlinVersion = '1.9.23'
+	ext.kotlinVersion = '1.9.24'
 	ext.isCI = System.getenv('GITHUB_ACTION')
 	repositories {
 		mavenCentral()
@@ -21,10 +21,10 @@ plugins {
 	id 'idea'
 	id 'org.ajoberstar.grgit' version '4.1.1'
 	id 'io.spring.nohttp' version '0.0.11'
-	id 'io.spring.dependency-management' version '1.1.4' apply false
+	id 'io.spring.dependency-management' version '1.1.5' apply false
 	id 'org.antora' version '1.0.0'
 	id 'io.spring.antora.generate-antora-yml' version '0.0.1'
-	id 'com.github.spotbugs' version '6.0.12'
+	id 'com.github.spotbugs' version '6.0.14'
 }
 
 description = 'Spring AMQP'
@@ -61,18 +61,18 @@ ext {
 	logbackVersion = '1.4.14'
 	lz4Version = '1.8.0'
 	micrometerDocsVersion = '1.0.2'
-	micrometerVersion = '1.12.5'
-	micrometerTracingVersion = '1.2.5'
+	micrometerVersion = '1.12.6'
+	micrometerTracingVersion = '1.2.6'
 	mockitoVersion = '5.6.0'
 	rabbitmqStreamVersion = '0.14.0'
 	rabbitmqVersion = '5.19.0'
-	reactorVersion = '2023.0.5'
+	reactorVersion = '2023.0.6'
 	snappyVersion = '1.1.10.5'
-	springDataVersion = '2023.1.5'
-	springRetryVersion = '2.0.5'
-	springVersion = '6.1.6'
-	testcontainersVersion = '1.19.7'
-	zstdJniVersion = '1.5.6-2'
+	springDataVersion = '2023.1.6'
+	springRetryVersion = '2.0.6'
+	springVersion = '6.1.7'
+	testcontainersVersion = '1.19.8'
+	zstdJniVersion = '1.5.6-3'
 
 	javaProjects = subprojects - project(':spring-amqp-bom')
 }
