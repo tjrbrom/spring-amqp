@@ -76,6 +76,7 @@ import org.springframework.context.EnvironmentAware;
 import org.springframework.context.expression.StandardBeanExpressionResolver;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.core.annotation.MergedAnnotation;
 import org.springframework.core.annotation.MergedAnnotations;
 import org.springframework.core.annotation.MergedAnnotations.SearchStrategy;
 import org.springframework.core.convert.ConversionService;
@@ -317,12 +318,12 @@ public class RabbitListenerAnnotationBeanPostProcessor
 
 	private TypeMetadata buildMetadata(Class<?> targetClass) {
 		List<RabbitListener> classLevelListeners = findListenerAnnotations(targetClass);
-		final boolean hasClassLevelListeners = classLevelListeners.size() > 0;
+		final boolean hasClassLevelListeners = !classLevelListeners.isEmpty();
 		final List<ListenerMethod> methods = new ArrayList<>();
 		final List<Method> multiMethods = new ArrayList<>();
 		ReflectionUtils.doWithMethods(targetClass, method -> {
 			List<RabbitListener> listenerAnnotations = findListenerAnnotations(method);
-			if (listenerAnnotations.size() > 0) {
+			if (!listenerAnnotations.isEmpty()) {
 				methods.add(new ListenerMethod(method,
 						listenerAnnotations.toArray(new RabbitListener[listenerAnnotations.size()])));
 			}
@@ -357,14 +358,14 @@ public class RabbitListenerAnnotationBeanPostProcessor
 					}
 					return !name.contains("$MockitoMock$");
 				})
-				.map(ann -> ann.synthesize())
+				.map(MergedAnnotation::synthesize)
 				.collect(Collectors.toList());
 	}
 
 	private void processMultiMethodListeners(RabbitListener[] classLevelListeners, Method[] multiMethods,
 			Object bean, String beanName) {
 
-		List<Method> checkedMethods = new ArrayList<Method>();
+		List<Method> checkedMethods = new ArrayList<>();
 		Method defaultMethod = null;
 		for (Method method : multiMethods) {
 			Method checked = checkProxy(method, bean);
@@ -734,7 +735,7 @@ public class RabbitListenerAnnotationBeanPostProcessor
 	}
 
 	private String[] registerBeansForDeclaration(RabbitListener rabbitListener, Collection<Declarable> declarables) {
-		List<String> queues = new ArrayList<String>();
+		List<String> queues = new ArrayList<>();
 		if (this.beanFactory instanceof ConfigurableBeanFactory) {
 			for (QueueBinding binding : rabbitListener.bindings()) {
 				String queueName = declareQueue(binding.value(), declarables);
@@ -880,7 +881,7 @@ public class RabbitListenerAnnotationBeanPostProcessor
 				}
 			}
 		}
-		return map.size() < 1 ? null : map;
+		return map.isEmpty() ? null : map;
 	}
 
 	private void addToMap(Map<String, Object> map, String key, Object value, Class<?> typeClass, String typeName) {
@@ -893,7 +894,7 @@ public class RabbitListenerAnnotationBeanPostProcessor
 			}
 		}
 		else {
-			if (value instanceof String && !StringUtils.hasText((String) value)) {
+			if (value instanceof String string && !StringUtils.hasText(string)) {
 				putEmpty(map, key);
 			}
 			else {

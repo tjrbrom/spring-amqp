@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2021 the original author or authors.
+ * Copyright 2002-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,6 +42,7 @@ import org.springframework.util.xml.DomUtils;
 /**
  * @author Mark Fisher
  * @author Gary Russell
+ * @author Ngoc Nhan
  * @since 1.0
  */
 class ListenerContainerParser implements BeanDefinitionParser {
@@ -100,8 +101,8 @@ class ListenerContainerParser implements BeanDefinitionParser {
 		}
 
 		List<Element> childElements = DomUtils.getChildElementsByTagName(element, LISTENER_ELEMENT);
-		for (int i = 0; i < childElements.size(); i++) {
-			parseListener(childElements.get(i), element, parserContext, containerList);
+		for (Element childElement : childElements) {
+			parseListener(childElement, element, parserContext, containerList);
 		}
 
 		parserContext.popAndRegisterContainingComponent();
@@ -188,22 +189,22 @@ class ListenerContainerParser implements BeanDefinitionParser {
 			}
 			else {
 				String[] names = StringUtils.commaDelimitedListToStringArray(queues);
-				List<RuntimeBeanReference> values = new ManagedList<RuntimeBeanReference>();
-				for (int i = 0; i < names.length; i++) {
-					values.add(new RuntimeBeanReference(names[i].trim()));
+				List<RuntimeBeanReference> values = new ManagedList<>();
+				for (String name : names) {
+					values.add(new RuntimeBeanReference(name.trim()));
 				}
 				containerDef.getPropertyValues().add("queues", values);
 			}
 		}
 
-		ManagedMap<String, TypedStringValue> args = new ManagedMap<String, TypedStringValue>();
+		ManagedMap<String, TypedStringValue> args = new ManagedMap<>();
 
 		String priority = listenerEle.getAttribute("priority");
 		if (StringUtils.hasText(priority)) {
 			args.put("x-priority", new TypedStringValue(priority, Integer.class));
 		}
 
-		if (args.size() > 0) {
+		if (!args.isEmpty()) {
 			containerDef.getPropertyValues().add("consumerArguments", args);
 		}
 

@@ -18,13 +18,13 @@ buildscript {
 plugins {
 	id 'base'
 	id 'idea'
-	id 'org.ajoberstar.grgit' version '5.2.2'
+	id 'org.ajoberstar.grgit' version '5.3.0'
 	id 'io.spring.nohttp' version '0.0.11'
 	id 'io.spring.dependency-management' version '1.1.6' apply false
 	id 'org.antora' version '1.0.0'
 	id 'io.spring.antora.generate-antora-yml' version '0.0.1'
-	id 'com.github.spotbugs' version '6.0.22'
-	id 'io.freefair.aggregate-javadoc' version '8.6'
+	id 'com.github.spotbugs' version '6.0.26'
+	id 'io.freefair.aggregate-javadoc' version '8.10.2'
 }
 
 description = 'Spring AMQP'
@@ -48,32 +48,28 @@ ext {
 	assertjVersion = '3.26.3'
 	assertkVersion = '0.28.1'
 	awaitilityVersion = '4.2.2'
-	commonsCompressVersion = '1.27.1'
-	commonsHttpClientVersion = '5.3.1'
+	commonsHttpClientVersion = '5.4.1'
 	commonsPoolVersion = '2.12.0'
-	hamcrestVersion = '2.2'
+	hamcrestVersion = '3.0'
 	hibernateValidationVersion = '8.0.1.Final'
-	jacksonBomVersion = '2.17.2'
+	jacksonBomVersion = '2.18.1'
 	jaywayJsonPathVersion = '2.9.0'
 	junit4Version = '4.13.2'
-	junitJupiterVersion = '5.11.0'
+	junitJupiterVersion = '5.11.3'
 	kotlinCoroutinesVersion = '1.8.1'
-	log4jVersion = '2.24.0'
-	logbackVersion = '1.5.8'
-	lz4Version = '1.8.0'
+	log4jVersion = '2.24.1'
+	logbackVersion = '1.5.12'
 	micrometerDocsVersion = '1.0.4'
 	micrometerVersion = '1.14.0-SNAPSHOT'
 	micrometerTracingVersion = '1.4.0-SNAPSHOT'
-	mockitoVersion = '5.13.0'
-	rabbitmqStreamVersion = '0.15.0'
-	rabbitmqVersion = '5.21.0'
+	mockitoVersion = '5.14.2'
+	rabbitmqStreamVersion = '0.18.0'
+	rabbitmqVersion = '5.22.0'
 	reactorVersion = '2024.0.0-SNAPSHOT'
-	snappyVersion = '1.1.10.7'
-	springDataVersion = '2024.0.4'
-	springRetryVersion = '2.0.9'
+	springDataVersion = '2024.1.0-SNAPSHOT'
+	springRetryVersion = '2.0.10'
 	springVersion = '6.2.0-SNAPSHOT'
-	testcontainersVersion = '1.20.1'
-	zstdJniVersion = '1.5.6-5'
+	testcontainersVersion = '1.20.3'
 
 	javaProjects = subprojects - project(':spring-amqp-bom')
 }
@@ -83,11 +79,11 @@ antora {
 	playbook = file('src/reference/antora/antora-playbook.yml')
 	options = ['to-dir' : project.layout.buildDirectory.dir('site').get().toString(), clean: true, fetch: !project.gradle.startParameter.offline, stacktrace: true]
 	dependencies = [
-			'@antora/atlas-extension': '1.0.0-alpha.1',
-			'@antora/collector-extension': '1.0.0-alpha.3',
-			'@asciidoctor/tabs': '1.0.0-beta.3',
-			'@springio/antora-extensions': '1.11.1',
-			'@springio/asciidoctor-extensions': '1.0.0-alpha.10',
+			'@antora/atlas-extension': '1.0.0-alpha.2',
+			'@antora/collector-extension': '1.0.0-beta.3',
+			'@asciidoctor/tabs': '1.0.0-beta.6',
+			'@springio/antora-extensions': '1.14.2',
+			'@springio/asciidoctor-extensions': '1.0.0-alpha.14',
 	]
 }
 
@@ -315,7 +311,7 @@ configure(javaProjects) { subproject ->
 
 	checkstyle {
 		configDirectory.set(rootProject.file("src/checkstyle"))
-		toolVersion = '10.8.0'
+		toolVersion = '10.18.2'
 	}
 
 	jar {
@@ -469,13 +465,10 @@ project('spring-rabbit-stream') {
 		testRuntimeOnly 'com.fasterxml.jackson.core:jackson-databind'
 		testRuntimeOnly 'com.fasterxml.jackson.dataformat:jackson-dataformat-xml'
 		testRuntimeOnly 'com.fasterxml.jackson.module:jackson-module-kotlin'
-		testRuntimeOnly "org.apache.commons:commons-compress:$commonsCompressVersion"
-		testRuntimeOnly "org.xerial.snappy:snappy-java:$snappyVersion"
-		testRuntimeOnly "org.lz4:lz4-java:$lz4Version"
-		testRuntimeOnly "com.github.luben:zstd-jni:$zstdJniVersion"
+
 		testImplementation "org.testcontainers:rabbitmq"
 		testImplementation "org.testcontainers:junit-jupiter"
-		testImplementation "org.apache.logging.log4j:log4j-slf4j-impl:$log4jVersion"
+		testImplementation 'org.apache.logging.log4j:log4j-slf4j-impl'
 		testImplementation 'org.springframework:spring-webflux'
 		testImplementation 'io.micrometer:micrometer-observation-test'
 		testImplementation 'io.micrometer:micrometer-tracing-bridge-brave'

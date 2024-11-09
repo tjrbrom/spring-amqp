@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 the original author or authors.
+ * Copyright 2014-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -46,6 +46,7 @@ import org.springframework.util.Assert;
  * @author Stephane Nicoll
  * @author Gary Russell
  * @author Artem Bilan
+ * @author Ngoc Nhan
  *
  * @since 1.4
  *
@@ -298,7 +299,7 @@ public abstract class AbstractRabbitListenerEndpoint implements RabbitListenerEn
 	 * @return true if batch.
 	 */
 	public boolean isBatchListener() {
-		return this.batchListener == null ? false : this.batchListener;
+		return this.batchListener != null && this.batchListener;
 	}
 
 	@Override
@@ -396,8 +397,7 @@ public abstract class AbstractRabbitListenerEndpoint implements RabbitListenerEn
 				throw new IllegalStateException("Queues or queue names must be provided but not both for " + this);
 			}
 			if (queuesEmpty) {
-				Collection<String> names = qNames;
-				container.setQueueNames(names.toArray(new String[0]));
+				container.setQueueNames(qNames.toArray(new String[0]));
 			}
 			else {
 				Collection<Queue> instances = getQueues();

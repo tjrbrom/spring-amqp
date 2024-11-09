@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 the original author or authors.
+ * Copyright 2014-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,6 +39,7 @@ import org.springframework.util.Assert;
  * length field.
  *
  * @author Gary Russell
+ * @author Ngoc Nhan
  * @since 1.4.1
  *
  */
@@ -50,7 +51,7 @@ public class SimpleBatchingStrategy implements BatchingStrategy {
 
 	private final long timeout;
 
-	private final List<Message> messages = new ArrayList<Message>();
+	private final List<Message> messages = new ArrayList<>();
 
 	private String exchange;
 
@@ -87,7 +88,7 @@ public class SimpleBatchingStrategy implements BatchingStrategy {
 		}
 		int bufferUse = Integer.BYTES + message.getBody().length;
 		MessageBatch batch = null;
-		if (this.messages.size() > 0 && this.currentSize + bufferUse > this.bufferLimit) {
+		if (!this.messages.isEmpty() && this.currentSize + bufferUse > this.bufferLimit) {
 			batch = doReleaseBatch();
 			this.exchange = exch;
 			this.routingKey = routKey;
@@ -103,16 +104,15 @@ public class SimpleBatchingStrategy implements BatchingStrategy {
 
 	@Override
 	public Date nextRelease() {
-		if (this.messages.size() == 0 || this.timeout <= 0) {
+		if (this.messages.isEmpty() || this.timeout <= 0) {
 			return null;
 		}
-		else if (this.currentSize >= this.bufferLimit) {
+		if (this.currentSize >= this.bufferLimit) {
 			// release immediately, we're already over the limit
 			return new Date();
 		}
-		else {
-			return new Date(System.currentTimeMillis() + this.timeout);
-		}
+
+		return new Date(System.currentTimeMillis() + this.timeout);
 	}
 
 	@Override
@@ -121,13 +121,12 @@ public class SimpleBatchingStrategy implements BatchingStrategy {
 		if (batch == null) {
 			return Collections.emptyList();
 		}
-		else {
-			return Collections.singletonList(batch);
-		}
+
+		return Collections.singletonList(batch);
 	}
 
 	private MessageBatch doReleaseBatch() {
-		if (this.messages.size() < 1) {
+		if (this.messages.isEmpty()) {
 			return null;
 		}
 		Message message = assembleMessage();

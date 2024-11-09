@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2023 the original author or authors.
+ * Copyright 2002-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -91,6 +91,7 @@ import com.rabbitmq.client.impl.recovery.AutorecoveringChannel;
  * @author Arnaud Cogoluègnes
  * @author Artem Bilan
  * @author Christian Tzolov
+ * @author Ngoc Nhan
  *
  * @since 1.0.1
  *
@@ -903,12 +904,12 @@ public class PublisherCallbackChannelImpl
 	@Override
 	public void addListener(Listener listener) {
 		Assert.notNull(listener, "Listener cannot be null");
-		if (this.listeners.size() == 0) {
+		if (this.listeners.isEmpty()) {
 			this.delegate.addConfirmListener(this);
 			this.delegate.addReturnListener(this);
 		}
 		if (this.listeners.putIfAbsent(listener.getUUID(), listener) == null) {
-			this.pendingConfirms.put(listener, new ConcurrentSkipListMap<Long, PendingConfirm>());
+			this.pendingConfirms.put(listener, new ConcurrentSkipListMap<>());
 			if (this.logger.isDebugEnabled()) {
 				this.logger.debug("Added listener " + listener);
 			}
@@ -921,27 +922,26 @@ public class PublisherCallbackChannelImpl
 		try {
 			SortedMap<Long, PendingConfirm> pendingConfirmsForListener = this.pendingConfirms.get(listener);
 			if (pendingConfirmsForListener == null) {
-				return Collections.<PendingConfirm>emptyList();
+				return Collections.emptyList();
 			}
-			else {
-				List<PendingConfirm> expired = new ArrayList<PendingConfirm>();
-				Iterator<Entry<Long, PendingConfirm>> iterator = pendingConfirmsForListener.entrySet().iterator();
-				while (iterator.hasNext()) {
-					PendingConfirm pendingConfirm = iterator.next().getValue();
-					if (pendingConfirm.getTimestamp() < cutoffTime) {
-						expired.add(pendingConfirm);
-						iterator.remove();
-						CorrelationData correlationData = pendingConfirm.getCorrelationData();
-						if (correlationData != null && StringUtils.hasText(correlationData.getId())) {
-							this.pendingReturns.remove(correlationData.getId()); // NOSONAR never null
-						}
-					}
-					else {
-						break;
+
+			List<PendingConfirm> expired = new ArrayList<>();
+			Iterator<Entry<Long, PendingConfirm>> iterator = pendingConfirmsForListener.entrySet().iterator();
+			while (iterator.hasNext()) {
+				PendingConfirm pendingConfirm = iterator.next().getValue();
+				if (pendingConfirm.getTimestamp() < cutoffTime) {
+					expired.add(pendingConfirm);
+					iterator.remove();
+					CorrelationData correlationData = pendingConfirm.getCorrelationData();
+					if (correlationData != null && StringUtils.hasText(correlationData.getId())) {
+						this.pendingReturns.remove(correlationData.getId()); // NOSONAR never null
 					}
 				}
-				return expired;
+				else {
+					break;
+				}
 			}
+			return expired;
 		}
 		finally {
 			this.lock.unlock();
@@ -1025,7 +1025,7 @@ public class PublisherCallbackChannelImpl
 		 */
 		Map<Long, Listener> involvedListeners = this.listenerForSeq.headMap(seq + 1);
 		// eliminate duplicates
-		Set<Listener> listenersForAcks = new HashSet<Listener>(involvedListeners.values());
+		Set<Listener> listenersForAcks = new HashSet<>(involvedListeners.values());
 		for (Listener involvedListener : listenersForAcks) {
 			// find all unack'd confirms for this listener and handle them
 			SortedMap<Long, PendingConfirm> confirmsMap = this.pendingConfirms.get(involvedListener);
@@ -1047,7 +1047,7 @@ public class PublisherCallbackChannelImpl
 				}
 			}
 		}
-		List<Long> seqs = new ArrayList<Long>(involvedListeners.keySet());
+		List<Long> seqs = new ArrayList<>(involvedListeners.keySet());
 		for (Long key : seqs) {
 			this.listenerForSeq.remove(key);
 		}

@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2023 the original author or authors.
+ * Copyright 2002-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -63,7 +63,7 @@ import com.rabbitmq.client.impl.nio.NioParams;
  * optionally enabling SSL, with or without certificate validation. When
  * {@link #setSslPropertiesLocation(Resource) sslPropertiesLocation} is not null, the
  * default implementation loads a {@code PKCS12} keystore and a {@code JKS} truststore
- * using the supplied properties and intializes key and trust manager factories, using
+ * using the supplied properties and initializes key and trust manager factories, using
  * algorithm {@code SunX509} by default. These are then used to initialize an
  * {@link SSLContext} using the {@link #setSslAlgorithm(String) sslAlgorithm} (default
  * TLSv1.2, falling back to TLSv1.1, if 1.2 is not available).
@@ -79,6 +79,7 @@ import com.rabbitmq.client.impl.nio.NioParams;
  * @author Hareendran
  * @author Dominique Villard
  * @author Zachary DeLuca
+ * @author Ngoc Nhan
  *
  * @since 1.4
  */
@@ -360,12 +361,11 @@ public class RabbitConnectionFactoryBean extends AbstractFactoryBean<ConnectionF
 		if (this.keyStoreType == null && this.sslProperties.getProperty(KEY_STORE_TYPE) == null) {
 			return KEY_STORE_DEFAULT_TYPE;
 		}
-		else if (this.keyStoreType != null) {
+		if (this.keyStoreType != null) {
 			return this.keyStoreType;
 		}
-		else {
-			return this.sslProperties.getProperty(KEY_STORE_TYPE);
-		}
+
+		return this.sslProperties.getProperty(KEY_STORE_TYPE);
 	}
 
 	/**
@@ -389,12 +389,11 @@ public class RabbitConnectionFactoryBean extends AbstractFactoryBean<ConnectionF
 		if (this.trustStoreType == null && this.sslProperties.getProperty(TRUST_STORE_TYPE) == null) {
 			return TRUST_STORE_DEFAULT_TYPE;
 		}
-		else if (this.trustStoreType != null) {
+		if (this.trustStoreType != null) {
 			return this.trustStoreType;
 		}
-		else {
-			return this.sslProperties.getProperty(TRUST_STORE_TYPE);
-		}
+
+		return this.sslProperties.getProperty(TRUST_STORE_TYPE);
 	}
 
 	/**

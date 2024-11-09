@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2023 the original author or authors.
+ * Copyright 2002-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@ import org.springframework.util.Assert;
  * @author Mark Fisher
  * @author Dave Syer
  * @author Gary Russell
+ * @author Ngoc Nhan
  */
 public final class BindingBuilder {
 
@@ -50,7 +51,7 @@ public final class BindingBuilder {
 	}
 
 	private static Map<String, Object> createMapForKeys(String... keys) {
-		Map<String, Object> map = new HashMap<String, Object>();
+		Map<String, Object> map = new HashMap<>();
 		for (String key : keys) {
 			map.put(key, null);
 		}
@@ -81,7 +82,7 @@ public final class BindingBuilder {
 		}
 
 		public Binding to(FanoutExchange exchange) {
-			return new Binding(this.queue, this.name, this.type, exchange.getName(), "", new HashMap<String, Object>());
+			return new Binding(this.queue, this.name, this.type, exchange.getName(), "", new HashMap<>());
 		}
 
 		public HeadersExchangeMapConfigurer to(HeadersExchange exchange) {
@@ -155,7 +156,7 @@ public final class BindingBuilder {
 			}
 
 			public Binding matches(Object value) {
-				Map<String, Object> map = new HashMap<String, Object>();
+				Map<String, Object> map = new HashMap<>();
 				map.put(this.key, value);
 				return new Binding(HeadersExchangeMapConfigurer.this.destination.queue,
 						HeadersExchangeMapConfigurer.this.destination.name,
@@ -194,7 +195,7 @@ public final class BindingBuilder {
 
 			HeadersExchangeMapBindingCreator(Map<String, Object> headerMap, boolean matchAll) {
 				Assert.notEmpty(headerMap, "header map must not be empty");
-				this.headerMap = new HashMap<String, Object>(headerMap);
+				this.headerMap = new HashMap<>(headerMap);
 				this.headerMap.put("x-match", (matchAll ? "all" : "any"));
 			}
 
@@ -230,12 +231,12 @@ public final class BindingBuilder {
 
 		public Binding with(String routingKey) {
 			return new Binding(destination.queue, destination.name, destination.type, exchange, routingKey,
-					Collections.<String, Object>emptyMap());
+					Collections.emptyMap());
 		}
 
 		public Binding with(Enum<?> routingKeyEnum) {
 			return new Binding(destination.queue, destination.name, destination.type, exchange,
-					routingKeyEnum.toString(), Collections.<String, Object>emptyMap());
+					routingKeyEnum.toString(), Collections.emptyMap());
 		}
 	}
 
@@ -281,7 +282,7 @@ public final class BindingBuilder {
 		public Binding noargs() {
 			return new Binding(this.configurer.destination.queue,
 					this.configurer.destination.name, this.configurer.destination.type, this.configurer.exchange,
-					this.routingKey, Collections.<String, Object>emptyMap());
+					this.routingKey, Collections.emptyMap());
 		}
 
 	}
@@ -297,17 +298,17 @@ public final class BindingBuilder {
 
 		public Binding with(String routingKey) {
 			return new Binding(destination.queue, destination.name, destination.type, exchange, routingKey,
-					Collections.<String, Object>emptyMap());
+					Collections.emptyMap());
 		}
 
 		public Binding with(Enum<?> routingKeyEnum) {
 			return new Binding(destination.queue, destination.name, destination.type, exchange,
-					routingKeyEnum.toString(), Collections.<String, Object>emptyMap());
+					routingKeyEnum.toString(), Collections.emptyMap());
 		}
 
 		public Binding withQueueName() {
 			return new Binding(destination.queue, destination.name, destination.type, exchange, destination.name,
-					Collections.<String, Object>emptyMap());
+					Collections.emptyMap());
 		}
 
 	}

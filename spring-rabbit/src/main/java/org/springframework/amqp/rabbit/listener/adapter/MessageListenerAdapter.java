@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2022 the original author or authors.
+ * Copyright 2002-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -89,7 +89,7 @@ import com.rabbitmq.client.Channel;
  *
  * This next example illustrates a <code>Message</code> delegate that just consumes the <code>String</code> contents of
  * {@link Message Messages}. Notice also how the name of the <code>Message</code> handling method is different from the
- * {@link #ORIGINAL_DEFAULT_LISTENER_METHOD original} (this will have to be configured in the attandant bean
+ * {@link #ORIGINAL_DEFAULT_LISTENER_METHOD original} (this will have to be configured in the attendant bean
  * definition). Again, no <code>Message</code> will be sent back as the method returns <code>void</code>.
  *
  * <pre class="code">
@@ -118,6 +118,7 @@ import com.rabbitmq.client.Channel;
  * @author Gary Russell
  * @author Greg Turnquist
  * @author Cai Kun
+ * @author Ngoc Nhan
  *
  * @see #setDelegate
  * @see #setDefaultListenerMethod
@@ -129,7 +130,7 @@ import com.rabbitmq.client.Channel;
  */
 public class MessageListenerAdapter extends AbstractAdaptableMessageListener {
 
-	private final Map<String, String> queueOrTagToMethodName = new HashMap<String, String>();
+	private final Map<String, String> queueOrTagToMethodName = new HashMap<>();
 
 	/**
 	 * Out-of-the-box value for the default listener method: "handleMessage".
@@ -314,7 +315,7 @@ public class MessageListenerAdapter extends AbstractAdaptableMessageListener {
 	 * @see #setQueueOrTagToMethodName
 	 */
 	protected String getListenerMethodName(Message originalMessage, Object extractedMessage) {
-		if (this.queueOrTagToMethodName.size() > 0) {
+		if (!this.queueOrTagToMethodName.isEmpty()) {
 			MessageProperties props = originalMessage.getMessageProperties();
 			String methodName = this.queueOrTagToMethodName.get(props.getConsumerQueue());
 			if (methodName == null) {

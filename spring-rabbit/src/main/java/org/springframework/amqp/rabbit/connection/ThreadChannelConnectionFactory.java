@@ -1,5 +1,5 @@
 /*
- * Copyright 2020-2023 the original author or authors.
+ * Copyright 2020-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,6 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.stream.Collectors;
 
 import org.aopalliance.aop.Advice;
 import org.aopalliance.intercept.MethodInterceptor;
@@ -49,6 +48,7 @@ import com.rabbitmq.client.ShutdownListener;
  * @author Gary Russell
  * @author Leonardo Ferreira
  * @author Christian Tzolov
+ * @author Ngoc Nhan
  * @since 2.3
  *
  */
@@ -191,12 +191,12 @@ public class ThreadChannelConnectionFactory extends AbstractConnectionFactory
 				this.connection.forceClose();
 				this.connection = null;
 			}
-			if (this.switchesInProgress.size() > 0 && this.logger.isWarnEnabled()) {
+			if (!this.switchesInProgress.isEmpty() && this.logger.isWarnEnabled()) {
 				this.logger.warn("Unclaimed context switches from threads:" +
 						this.switchesInProgress.values()
 								.stream()
-								.map(t -> t.getName())
-								.collect(Collectors.toList()));
+								.map(Thread::getName)
+								.toList());
 			}
 			this.contextSwitches.clear();
 			this.switchesInProgress.clear();
@@ -318,23 +318,21 @@ public class ThreadChannelConnectionFactory extends AbstractConnectionFactory
 			Advice advice =
 					(MethodInterceptor) invocation -> {
 						String method = invocation.getMethod().getName();
-						switch (method) {
-							case "close":
+						return switch (method) {
+							case "close" -> {
 								handleClose(channel, transactional);
-								return null;
-							case "getTargetChannel":
-								return channel;
-							case "isTransactional":
-								return transactional;
-							case "confirmSelect":
+								yield null;
+							}
+							case "getTargetChannel" -> channel;
+							case "isTransactional" -> transactional;
+							case "confirmSelect" -> {
 								confirmSelected.set(true);
-								return channel.confirmSelect();
-							case "isConfirmSelected":
-								return confirmSelected.get();
-							case "isPublisherConfirms":
-								return false;
-						}
-						return null;
+								yield channel.confirmSelect();
+							}
+							case "isConfirmSelected" -> confirmSelected.get();
+							case "isPublisherConfirms" -> false;
+							default -> null;
+						};
 					};
 			NameMatchMethodPointcutAdvisor advisor = new NameMatchMethodPointcutAdvisor(advice);
 			advisor.addMethodName("close");
